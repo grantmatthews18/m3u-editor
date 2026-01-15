@@ -10,6 +10,7 @@ use App\Models\Job;
 use App\Models\PlaylistSyncStatus;
 use App\Models\PlaylistSyncStatusLog;
 use App\Models\User;
+use App\Services\ChannelMatchService;
 use App\Services\EpgCacheService;
 use App\Settings\GeneralSettings;
 use Carbon\Carbon;
@@ -221,6 +222,18 @@ class ProcessM3uImportComplete implements ShouldQueue
                     $removedGroups->clone()
                 );
             }
+        }
+
+        // Migrate custom playlist associations from removed channels to new channels
+        // This preserves custom playlist memberships when channels are re-added with different source_ids
+        $migrationStats = ChannelMatchService::migrateCustomPlaylistAssociations(
+            $playlist,
+            $removedChannels,
+            $this->batchNo
+        );
+
+        if ($migrationStats['associations_migrated'] > 0) {
+            logger()->info("Migrated {$migrationStats['associations_migrated']} custom playlist associations for {$migrationStats['channels_matched']} channels in playlist \"{$playlist->name}\"");
         }
 
         // Clear out invalid groups/channels (if any)

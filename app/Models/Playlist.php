@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Enums\ChannelMatchStrategy;
 use App\Enums\PlaylistChannelId;
 use App\Enums\PlaylistSourceType;
 use App\Enums\Status;
@@ -51,6 +52,8 @@ class Playlist extends Model
         'auto_merge_channels_enabled' => 'boolean',
         'auto_merge_deactivate_failover' => 'boolean',
         'auto_merge_config' => 'array',
+        'channel_match_strategies' => 'array',
+        'preserve_custom_playlist_associations' => 'boolean',
         'emby_config' => 'array',
         'custom_headers' => 'array',
         'strict_live_ts' => 'boolean',
@@ -58,6 +61,32 @@ class Playlist extends Model
         'id_channel_by' => PlaylistChannelId::class,
         'source_type' => PlaylistSourceType::class,
     ];
+
+    /**
+     * Get the effective channel match strategies for this playlist.
+     * Returns the configured strategies or defaults based on playlist type.
+     *
+     * @return array<ChannelMatchStrategy>
+     */
+    public function getEffectiveChannelMatchStrategies(): array
+    {
+        // If user has configured strategies, use those
+        if (! empty($this->channel_match_strategies)) {
+            return collect($this->channel_match_strategies)
+                ->map(fn ($strategy) => ChannelMatchStrategy::tryFrom($strategy))
+                ->filter()
+                ->values()
+                ->toArray();
+        }
+
+        // Default: for Xtream playlists, use stream_id as primary
+        // For M3U playlists, use name_group as primary (since they typically don't have consistent stream_ids)
+        if ($this->xtream) {
+            return [ChannelMatchStrategy::StreamId];
+        }
+
+        return [ChannelMatchStrategy::NameGroup];
+    }
 
     public function getFolderPathAttribute(): string
     {

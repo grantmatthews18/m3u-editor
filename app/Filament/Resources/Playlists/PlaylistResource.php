@@ -2,6 +2,7 @@
 
 namespace App\Filament\Resources\Playlists;
 
+use App\Enums\ChannelMatchStrategy;
 use App\Enums\Status;
 use App\Facades\PlaylistFacade;
 use App\Filament\Resources\Playlists\Pages\CreatePlaylist;
@@ -1491,6 +1492,41 @@ class PlaylistResource extends Resource
                 ])->hidden(fn (Get $get): bool => ! $get('xtream')),
         ];
 
+        $channelMatchFields = [
+            Section::make('Channel Matching')
+                ->description('Configure how channels are matched during playlist sync')
+                ->columnSpanFull()
+                ->collapsible()
+                ->collapsed($creating)
+                ->columns(2)
+                ->schema([
+                    Select::make('channel_match_strategies')
+                        ->label('Channel Match Strategies')
+                        ->helperText('Select and order the strategies used to match channels during sync. The first strategy is used as the primary match. If channels are removed and re-added, additional strategies help preserve custom playlist associations. Drag to reorder priority.')
+                        ->options(collect(ChannelMatchStrategy::cases())->mapWithKeys(fn ($strategy) => [
+                            $strategy->value => $strategy->getLabel(),
+                        ])->toArray())
+                        ->hintIcon(
+                            'heroicon-s-information-circle',
+                            tooltip: 'Stream ID: Uses the provider\'s unique stream ID (best for Xtream when IDs are stable). Name+Group: Combines channel name and group (useful when stream IDs change). Title+Group: Similar but uses display title. Name/Title Only: Matches by name or title alone (less precise).',
+                        )
+                        ->multiple()
+                        ->reorderable()
+                        ->columnSpanFull()
+                        ->default(fn (Get $get) => $get('xtream') ? ['stream_id'] : ['name_group']),
+                    Toggle::make('preserve_custom_playlist_associations')
+                        ->label('Preserve Custom Playlist Associations')
+                        ->inline(false)
+                        ->default(true)
+                        ->columnSpanFull()
+                        ->hintIcon(
+                            'heroicon-s-information-circle',
+                            tooltip: 'When enabled, if a channel is removed and a matching channel is added (based on the match strategies above), the custom playlist memberships will be automatically transferred to the new channel.',
+                        )
+                        ->helperText('When channels are removed and re-added during sync (e.g., after provider credential changes), automatically migrate custom playlist associations to matching new channels.'),
+                ])->hiddenOn('create'),
+        ];
+
         $outputFields = [
             Section::make('Playlist Output')
                 ->description('Determines how the playlist is output')
@@ -1772,6 +1808,7 @@ class PlaylistResource extends Resource
         $sections['Type'] = $typeFields;
         $sections['Scheduling'] = $schedulingFields;
         $sections['Processing'] = $processingFields;
+        $sections['Channel Matching'] = $channelMatchFields;
         $sections['Output'] = $outputFields;
 
         // Return sections and fields
@@ -1793,11 +1830,12 @@ class PlaylistResource extends Resource
                 'type' => 'heroicon-m-document-text',
                 'scheduling' => 'heroicon-m-calendar',
                 'processing' => 'heroicon-m-arrow-path',
+                'channel matching' => 'heroicon-m-link',
                 'output' => 'heroicon-m-arrow-up-right',
                 default => null,
             };
 
-            if (! in_array($section, ['Processing', 'Output'])) {
+            if (! in_array($section, ['Processing', 'Channel Matching', 'Output'])) {
                 // Wrap the fields in a section
                 $fields = [
                     Section::make($section)
@@ -1830,6 +1868,10 @@ class PlaylistResource extends Resource
     {
         $wizard = [];
         foreach (self::getFormSections(creating: true) as $step => $fields) {
+            // Skip Channel Matching during creation - it's only relevant after playlist exists
+            if ($step === 'Channel Matching') {
+                continue;
+            }
             if (! in_array($step, ['Processing', 'Output'])) {
                 // Wrap the fields in a section
                 $fields = [

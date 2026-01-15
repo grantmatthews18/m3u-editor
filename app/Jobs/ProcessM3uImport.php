@@ -10,6 +10,7 @@ use App\Models\Job;
 use App\Models\Playlist;
 use App\Models\SourceCategory;
 use App\Models\SourceGroup;
+use App\Services\ChannelMatchService;
 use App\Traits\ProviderRequestDelay;
 use Carbon\Carbon;
 use Exception;
@@ -444,12 +445,17 @@ class ProcessM3uImport implements ShouldQueue
                             'group' => $category['category_name'] ?? '',
                             'group_internal' => $category['category_name'] ?? '',
                             'stream_id' => $item->epg_channel_id ?? $item->stream_id, // prefer EPG id for mapping, if set
-                            'source_id' => $item->stream_id, // source ID for the channel
                             'channel' => $item->num ?? null,
                             'catchup' => $item->tv_archive ?? null,
                             'shift' => $item->tv_archive_duration ?? 0,
                             // 'tvg_shift' => $item->tvg_shift ?? null, // @TODO: check if this is on Xtream API, not seeing it as a deffinition in the API docs
                         ];
+                        // Generate source_id based on playlist's channel match strategy
+                        // Default to stream_id for backwards compatibility
+                        $channel['source_id'] = ChannelMatchService::generateSourceId(
+                            array_merge($channel, ['stream_id' => $item->stream_id]),
+                            $this->playlist
+                        );
                         if ($autoSort) {
                             $channel['sort'] = $localChannelNo;
                         }
@@ -494,7 +500,6 @@ class ProcessM3uImport implements ShouldQueue
                             'group' => $category['category_name'] ?? '',
                             'group_internal' => $category['category_name'] ?? '',
                             'stream_id' => $item->stream_id,
-                            'source_id' => $item->stream_id, // source ID for the channel
                             'channel' => $item->num ?? null,
                             'is_vod' => true, // mark as VOD
                             'container_extension' => $extension, // store the container extension
@@ -502,6 +507,12 @@ class ProcessM3uImport implements ShouldQueue
                             'rating' => $item->rating ?? null, // new field for rating
                             'rating_5based' => $item->rating_5based ?? null, // new field for 5-based rating
                         ];
+                        // Generate source_id based on playlist's channel match strategy
+                        // Default to stream_id for backwards compatibility
+                        $channel['source_id'] = ChannelMatchService::generateSourceId(
+                            array_merge($channel, ['stream_id' => $item->stream_id]),
+                            $this->playlist
+                        );
                         if ($autoSort) {
                             $channel['sort'] = $localChannelNo;
                         }
@@ -782,12 +793,12 @@ class ProcessM3uImport implements ShouldQueue
                                     continue;
                                 }
 
-                                // Set the source ID based on our composite index
-                                $channel['source_id'] = md5($channel['title'].$channel['name'].$chGroup);
-
-                                // Update group name to the singular name and return the channel
+                                // Update group name to the singular name
                                 $channel['group'] = $chGroup;
                                 $channel['group_internal'] = $chGroup;
+
+                                // Generate source_id based on playlist's channel match strategy
+                                $channel['source_id'] = ChannelMatchService::generateSourceId($channel, $this->playlist);
 
                                 // Set channel number, if auto sort is enabled
                                 if ($autoSort) {
@@ -818,8 +829,8 @@ class ProcessM3uImport implements ShouldQueue
                                 continue;
                             }
 
-                            // Set the source ID based on our composite index
-                            $channel['source_id'] = md5($channel['title'].$channel['name'].$channel['group']);
+                            // Generate source_id based on playlist's channel match strategy
+                            $channel['source_id'] = ChannelMatchService::generateSourceId($channel, $this->playlist);
 
                             // Set channel number, if auto sort is enabled
                             if ($autoSort) {
