@@ -349,7 +349,15 @@ class CustomPlaylistResource extends Resource
                                         return [];
                                     }
 
-                                    return $playlist->groupTags()->pluck('name->en', 'name->en')->toArray();
+                                    // fetch the actual Tag models (or stdClass if relation returns them) and
+                                    // map to english name keys/values ourselves rather than relying on the
+                                    // database to handle the JSON path.  This avoids the earlier error where
+                                    // the query returned stdClass objects and `pluck('name->en')` attempted to
+                                    // treat `name->en` as a literal property name.
+                                    return $playlist->groupTags()
+                                        ->get()
+                                        ->mapWithKeys(fn ($tag) => [data_get($tag, 'name.en') => data_get($tag, 'name.en')])
+                                        ->toArray();
                                 }),
                             TextInput::make('pattern')
                                 ->required()
