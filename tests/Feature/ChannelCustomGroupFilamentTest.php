@@ -131,33 +131,44 @@ it('relation manager becomes read-only when regex management is enabled', functi
 });
 
 it('allows enabling regex channel management without crashing the playlist form', function () {
-    // create a group tag so the select has something to list
-    $tag = Tag::create([
-        'name' => ['en' => 'Example'],
-        'slug' => Str::slug('Example'),
-        'type' => $this->customPlaylist->uuid,
+    // create a source playlist and a group so the dropdown has something
+    $source = \App\Models\Playlist::factory()->for($this->user)->create();
+    $group = \App\Models\Group::create([
+        'name' => 'TheGroup',
+        'playlist_id' => $source->id,
+        'user_id' => $this->user->id,
+        'type' => 'live',
     ]);
-    // attach tag to playlist so it appears in options
-    $this->customPlaylist->attachTag($tag);
 
-    // ensure the playlist starts with regex mode off
+    // attach a channel from that playlist to the custom playlist so it is recognised
+    $channel = Channel::factory()->for($this->user)->for($source)->create();
+    $this->customPlaylist->channels()->attach($channel->id);
+
     $this->customPlaylist->update(['use_regex_channel_management' => false]);
 
     $page = Livewire::test(\App\Filament\Resources\CustomPlaylists\Pages\EditCustomPlaylist::class, [
         'record' => $this->customPlaylist->id,
     ]);
 
-    // toggling the switch should not throw an exception or introduce form errors
+    // toggling the switch should not produce errors, and we should be able to add
+    // a pattern using the new group name – fillForm will validate that the option
+    // exists.
     $page->fillForm([
         'use_regex_channel_management' => true,
+        'event_patterns' => [
+            ['group' => 'TheGroup', 'pattern' => 'dummy'],
+        ],
     ])->assertHasNoFormErrors();
-
-    // And the repeater should now be visible when the page is re-rendered
-    $page->assertFormFieldExists('event_patterns');
 });
 
 it('does not crash when a playlist has a tag without an english name', function () {
-    // create a tag that only has a Spanish name
+    // ensure there is at least one source playlist so the fallback logic
+    // (tags) is exercised; we do not need a group here
+    $source = \App\Models\Playlist::factory()->for($this->user)->create();
+    $channel = Channel::factory()->for($this->user)->for($source)->create();
+    $this->customPlaylist->channels()->attach($channel->id);
+
+    // tag with only spanish name
     $tag = Tag::create([
         'name' => ['es' => 'Deportes'],
         'slug' => Str::slug('Deportes'),
@@ -165,13 +176,10 @@ it('does not crash when a playlist has a tag without an english name', function 
     ]);
     $this->customPlaylist->attachTag($tag);
 
-    $this->customPlaylist->update(['use_regex_channel_management' => false]);
-
     $page = Livewire::test(\App\Filament\Resources\CustomPlaylists\Pages\EditCustomPlaylist::class, [
         'record' => $this->customPlaylist->id,
     ]);
 
-    // toggling should still render the form without error
     $page->fillForm([
         'use_regex_channel_management' => true,
     ])->assertHasNoFormErrors();

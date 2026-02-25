@@ -336,7 +336,11 @@ class CustomPlaylistResource extends Resource
                             Select::make('group')
                                 ->label('Group')
                                 ->required()
+                                ->live()
+                                ->helperText('Only channels in the selected group will be affected by the pattern.')
+                                ->searchable()
                                 ->options(function ($record): array {
+                                    // ensure we have a full model instance
                                     $playlist = null;
 
                                     if ($record instanceof \App\Models\CustomPlaylist) {
@@ -349,15 +353,34 @@ class CustomPlaylistResource extends Resource
                                         return [];
                                     }
 
-                                    return $playlist->groupTags()
-                                        ->get()
-                                        ->mapWithKeys(fn ($tag) => [
-                                            data_get($tag, 'name.en') => data_get($tag, 'name.en'),
-                                        ])
-                                        ->filter(function ($label, $value) {
-                                            return is_string($value) && $value !== '' && is_string($label) && $label !== '';
-                                        })
-                                        ->toArray();
+                                    // look up any real groups belonging to the source playlist(s)
+                                    $sourceIds = $playlist->getSourcePlaylists()->pluck('id')->all();
+
+                                    $options = [];
+                                    if (! empty($sourceIds)) {
+                                        $options = \App\Models\Group::query()
+                                            ->whereIn('playlist_id', $sourceIds)
+                                            ->where('type', 'live')
+                                            ->where('user_id', auth()->id())
+                                            ->orderBy('name')
+                                            ->pluck('name', 'name')
+                                            ->toArray();
+                                    }
+
+                                    // fall back to the tag-based names if there are none
+                                    if (empty($options)) {
+                                        $options = $playlist->groupTags()
+                                            ->get()
+                                            ->mapWithKeys(fn ($tag) => [
+                                                data_get($tag, 'name.en') => data_get($tag, 'name.en'),
+                                            ])
+                                            ->filter(function ($label, $value) {
+                                                return is_string($value) && $value !== '' && is_string($label) && $label !== '';
+                                            })
+                                            ->toArray();
+                                    }
+
+                                    return $options;
                                 }),
                             TextInput::make('pattern')
                                 ->required()
