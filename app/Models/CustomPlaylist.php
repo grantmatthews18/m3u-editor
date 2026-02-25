@@ -293,8 +293,17 @@ class CustomPlaylist extends Model
      */
     public function applyEventPattern(Channel $channel): ?array
     {
-        // determine the channel's group *within this custom playlist* (tag name)
-        $group = $channel->getCustomGroupName($this->uuid);
+        // determine the channel's group for the purposes of pattern matching.  we
+        // mimic the logic used in PlaylistGenerateController so that the name the
+        // user sees in the playlist (stored in `group` or `custom_group_name`) is
+        // the same string that we attempt to match against.
+        $group = $channel->group ?? '';
+        if (! empty($channel->custom_group_name)) {
+            $groupName = json_decode($channel->custom_group_name, true);
+            if (is_array($groupName)) {
+                $group = $groupName['en'] ?? $groupName[array_key_first($groupName)] ?? $group;
+            }
+        }
 
         $config = $this->getEventPatternForGroup($group);
         if (empty($config) || empty($config['pattern'])) {
@@ -310,7 +319,13 @@ class CustomPlaylist extends Model
         }
 
         // pick the field that actually contains the display text
-        $text = $channel->title_custom ?? $channel->title ?? $channel->name ?? '';
+        // We want to always run the regex against the "name" fields (which contain the
+        // full original string) rather than title_custom, because title_custom is used
+        // to store the parsed event name.  If we matched on title_custom we would
+        // immediately disable a channel on the next invocation since the event string
+        // will no longer contain the date/time portion.  The playlist controllers apply
+        // the pattern once per request, so re-running should be idempotent.
+        $text = $channel->name_custom ?? $channel->name ?? $channel->title_custom ?? $channel->title ?? '';
 
         if (! preg_match($regex, $text, $matches)) {
             if (! empty($config['disable_if_empty'])) {

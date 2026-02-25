@@ -294,7 +294,8 @@ class CustomPlaylistResource extends Resource
                         ->inline(false)
                         ->default(false)
                         ->helperText('When enabled, dummy EPG data will be generated for the next 5 days. Thus, it is possible to assign channels for which no EPG data is available. As program information, the channel name and the set program length are used.')
-                        ->required(),
+                        ->required()
+                        ->disabled(fn (?CustomPlaylist $record): bool => $record?->usesRegexManagement()),
                     Select::make('id_channel_by')
                         ->label('Preferred TVG ID output')
                         ->helperText('How you would like to ID your channels in the EPG.')
@@ -307,7 +308,8 @@ class CustomPlaylistResource extends Resource
                         ])
                         ->required()
                         ->default('stream_id') // Default to stream_id
-                        ->columnSpan(1),
+                        ->columnSpan(1)
+                        ->disabled(fn (?CustomPlaylist $record): bool => $record?->usesRegexManagement()),
                     TextInput::make('dummy_epg_length')
                         ->label('Dummy program length (in minutes)')
                         ->columnSpan(1)
@@ -315,7 +317,15 @@ class CustomPlaylistResource extends Resource
                         ->type('number')
                         ->default(120)
                         ->hidden(fn (Get $get): bool => ! $get('dummy_epg'))
-                        ->required(),
+                        ->required()
+                        ->disabled(fn (?CustomPlaylist $record): bool => $record?->usesRegexManagement()),
+                    Toggle::make('dummy_epg_category')
+                        ->label('Include Category in Dummy EPG')
+                        ->columnSpan(1)
+                        ->inline(false)
+                        ->helperText('When enabled, the channel group will be included as the programme category in dummy EPG.')
+                        ->default(false)
+                        ->disabled(fn (?CustomPlaylist $record): bool => $record?->usesRegexManagement()),
                 ]),
             // new switch that selects between manual vs regex management
             Toggle::make('use_regex_channel_management')

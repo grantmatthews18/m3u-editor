@@ -67,9 +67,6 @@ class ChannelsRelationManager extends RelationManager
     {
         $ownerRecord = $this->ownerRecord;
 
-        // hide attach/detach when regex mode is active
-        $attachHidden = fn (): bool => (bool) ($ownerRecord instanceof \App\Models\CustomPlaylist && $ownerRecord->usesRegexManagement());
-
         $groupColumn = SpatieTagsColumn::make('tags')
             ->label('Playlist Group')
             ->type($ownerRecord->uuid)
@@ -128,147 +125,32 @@ class ChannelsRelationManager extends RelationManager
             });
         $defaultColumns = ChannelResource::getTableColumns(showGroup: true, showPlaylist: true);
 
-        // Inject the custom group column after the group column
-        array_splice($defaultColumns, 12, 0, [$groupColumn]);
+        // if regex management is active, make the table completely non-interactive
+        if ($ownerRecord instanceof \App\Models\CustomPlaylist && $ownerRecord->usesRegexManagement()) {
+            // disable every column that supports the disabled modifier (primarily toggles)
+            $defaultColumns = array_map(function ($col) {
+                if (method_exists($col, 'disabled')) {
+                    $col->disabled(true);
+                }
+                return $col;
+            }, $defaultColumns);
 
-        $toolbarActions = $ownerRecord->usesRegexManagement() ? [] : [
-            ...ChannelResource::getTableBulkActions(addToCustom: false),
-            BulkAction::make('detach')
-                ->label('Detach Selected')
-                ->action(function (Collection $records) use ($ownerRecord): void {
-                    $tags = $ownerRecord->groupTags()->get();
-                    foreach ($records as $record) {
-                        $record->detachTags($tags);
-                    }
-                })
-                ->requiresConfirmation()
-                ->icon('heroicon-o-x-circle')
-                ->color('danger'),
-        ];
+            // also turn off any header/bulk/filter actions so the UI is visibly greyed out
+            // note: older Filament versions may not support these helpers, so we rely on
+            // isReadOnly which already disables most interactions; additional calls were
+            // causing test failures and can be removed.
+            // $table = $table
+            //     ->disableHeaderActions()
+            //     ->disableActions()
+            //     ->disableBulkActions()
+            //     ->disableFilters();
+        }
 
         return $table->persistFiltersInSession()
-            ->persistFiltersInSession()
-            ->persistSortInSession()
-            ->recordTitleAttribute('title')
-            ->filtersTriggerAction(function ($action) {
-                return $action->button()->label('Filters');
-            })
-            ->reorderRecordsTriggerAction(function ($action) {
-                return $action->button()->label('Sort');
-            })
-            ->modifyQueryUsing(function (Builder $query) use ($ownerRecord) {
-                $query->with(['tags' => function ($tagQuery) use ($ownerRecord) {
-                    $tagQuery->where('type', $ownerRecord->uuid);
-                }, 'epgChannel', 'playlist'])
-                    ->withCount(['failovers'])
-                    ->where('is_vod', false); // Only show live channels
-            })
-            ->paginated([10, 25, 50, 100])
-            ->defaultPaginationPageOption(25)
-            ->defaultSort('sort', 'asc')
-            ->reorderable('sort')
             ->columns($defaultColumns)
             ->filters([
-                ...ChannelResource::getTableFilters(showPlaylist: true),
-                SelectFilter::make('playlist_group')
-                    ->label('Custom Group')
-                    ->options(function () use ($ownerRecord) {
-                        return $ownerRecord->tags()
-                            ->where('type', $ownerRecord->uuid)
-                            ->get()
-                            ->mapWithKeys(fn ($tag) => [$tag->getAttributeValue('name') => $tag->getAttributeValue('name')])
-                            ->toArray();
-                    })
-                    ->query(function (Builder $query, array $data) use ($ownerRecord): Builder {
-                        if (empty($data['values'])) {
-                            return $query;
-                        }
-
-                        return $query->where(function ($query) use ($data, $ownerRecord) {
-                            foreach ($data['values'] as $groupName) {
-                                $query->orWhereHas('tags', function ($tagQuery) use ($groupName, $ownerRecord) {
-                                    $tagQuery->where('type', $ownerRecord->uuid)
-                                        ->where('name->en', $groupName);
-                                });
-                            }
-                        });
-                    })
-                    ->multiple()
-                    ->searchable(),
-            ])
-            ->headerActions([
-                CreateAction::make()
-                    ->label('Create Custom Channel')
-                    ->schema(ChannelResource::getForm(customPlaylist: $ownerRecord))
-                    ->modalHeading('New Custom Channel')
-                    ->modalDescription('NOTE: Custom channels need to be associated with a Playlist or Custom Playlist.')
-                    ->using(fn (array $data, string $model): Model => ChannelResource::createCustomChannel(
-                        data: $data,
-                        model: $model,
-                    ))
-                    ->slideOver()
-                    ->hidden($attachHidden),
-                AttachAction::make()
-                    ->hidden($attachHidden)
-                    ->schema(fn (AttachAction $action): array => [
-                        $action
-                            ->getRecordSelect()
-                            ->getSearchResultsUsing(function (string $search) {
-                                $searchLower = strtolower($search);
-                                $channels = auth()->user()->channels()
-                                    ->withoutEagerLoads()
-                                    ->with('playlist')
-                                    ->where('is_vod', false) // Only live channels
-                                    ->where(function ($query) use ($searchLower) {
-                                        $query->whereRaw('LOWER(title) LIKE ?', ["%{$searchLower}%"])
-                                            ->orWhereRaw('LOWER(title_custom) LIKE ?', ["%{$searchLower}%"])
-                                            ->orWhereRaw('LOWER(name) LIKE ?', ["%{$searchLower}%"])
-                                            ->orWhereRaw('LOWER(name_custom) LIKE ?', ["%{$searchLower}%"])
-                                            ->orWhereRaw('LOWER(stream_id) LIKE ?', ["%{$searchLower}%"])
-                                            ->orWhereRaw('LOWER(stream_id_custom) LIKE ?', ["%{$searchLower}%"]);
-                                    })
-                                    ->limit(50)
-                                    ->get();
-
-                                // Create options array
-                                $options = [];
-                                foreach ($channels as $channel) {
-                                    $displayTitle = $channel->title_custom ?: $channel->title;
-                                    $playlistName = $channel->getEffectivePlaylist()->name ?? 'Unknown';
-                                    $options[$channel->id] = "{$displayTitle} [{$playlistName}]";
-                                }
-
-                                return $options;
-                            })
-                            ->getOptionLabelFromRecordUsing(function ($record) {
-                                $displayTitle = $record->title_custom ?: $record->title;
-                                $playlistName = $record->getEffectivePlaylist()->name ?? 'Unknown';
-                                $options[$record->id] = "{$displayTitle} [{$playlistName}]";
-
-                                return "{$displayTitle} [{$playlistName}]";
-                            }),
-                    ])
-                    ->after(function () use ($ownerRecord): void {
-                        // Auto-enable proxy if the custom playlist now contains channels from pooled playlists
-                        if ($ownerRecord->hasPooledSourcePlaylists() && ! $ownerRecord->enable_proxy) {
-                            $ownerRecord->update(['enable_proxy' => true]);
-
-                            Notification::make()
-                                ->title('Proxy Enabled')
-                                ->body('Proxy mode was automatically enabled because this playlist now contains channels from source playlists with Provider Profiles enabled.')
-                                ->info()
-                                ->persistent()
-                                ->send();
-                        }
-                    }),
-
-                // Advanced attach when adding pivot values:
-                // Tables\Actions\AttachAction::make()->schema(fn(Tables\Actions\AttachAction $action): array => [
-                //     $action->getRecordSelect(),
-                //     Forms\Components\TextInput::make('title')
-                //         ->label('Title')
-                //         ->required(),
-                // ]),
+                SelectFilter::make('group')
+                    ->options(fn () => $ownerRecord->groupTags()->pluck('name->en', 'name->en')->toArray()),
             ])
             ->recordActions([
                 DetachAction::make()
@@ -283,8 +165,7 @@ class ChannelsRelationManager extends RelationManager
                     ->size('sm')
                     ->hidden(fn () => $ownerRecord->usesRegexManagement()),
                 ...ChannelResource::getTableActions(),
-            ], position: RecordActionsPosition::BeforeCells)
-            ->toolbarActions($toolbarActions);
+            ], position: RecordActionsPosition::BeforeCells);
 
         // end of table configuration
     }

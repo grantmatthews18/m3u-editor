@@ -250,6 +250,26 @@ class EpgApiController extends Controller
                     $channelNo = ++$channelNumber;
                 }
 
+                // If custom playlist, attempt to apply pattern matching early so that
+                // subsequent logic (dummy EPG entry generation, channel data, etc.)
+                // sees the updated title and enabled state.  This also avoids the
+                // situation where a previous test invocation mutated the channel
+                // and the pattern is applied against the already-truncated text.
+                $patternInfo = null;
+                if ($playlist instanceof \App\Models\CustomPlaylist && $playlist->usesRegexManagement()) {
+                    $patternInfo = $playlist->applyEventPattern($channel);
+                    if ($patternInfo && ! empty($patternInfo['event'])) {
+                        // Update display values immediately so that dummy EPG entries
+                        // use the parsed event name instead of the raw channel name.
+                        $channel->title_custom = $patternInfo['event'];
+                    }
+                    // skip disabled channels before doing any additional work
+                    if (! $channel->enabled) {
+                        // decrement totalChannels or skip further processing
+                        continue;
+                    }
+                }
+
                 // Ensure we always have a unique identifier for the channel
                 // Use database ID as fallback if channel number is not set
                 $channelKey = $channelNo ?: $channel->id;
@@ -304,7 +324,8 @@ class EpgApiController extends Controller
                     $entry = [
                         'playlist_channel_id' => $channelKey,
                         'display_name' => $channel->title_custom ?? $channel->title,
-                        'title' => $channel->name_custom ?? $channel->name,
+                        // prefer the custom title (event) if set, otherwise fall back to name_custom or name
+                        'title' => $channel->title_custom ?? $channel->name_custom ?? $channel->name,
                         'icon' => $icon,
                         'channel_number' => $channelNo,
                         'group' => $channel->group ?? $channel->group_internal,
@@ -356,20 +377,6 @@ class EpgApiController extends Controller
                     $channelFormat = 'ts';
                 } else {
                     $channelFormat = $channel->container_extension ?? 'ts';
-                }
-
-                // If custom playlist, attempt to apply pattern matching
-                if ($playlist instanceof \App\Models\CustomPlaylist && $playlist->usesRegexManagement()) {
-                    $patternInfo = $playlist->applyEventPattern($channel);
-                    if ($patternInfo && ! empty($patternInfo['event'])) {
-                        // Update display values
-                        $channel->title_custom = $patternInfo['event'];
-                    }
-                    // skip disabled channels immediately
-                    if (! $channel->enabled) {
-                        // decrement totalChannels or skip further processing
-                        continue;
-                    }
                 }
 
                 // Get the icon
