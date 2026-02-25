@@ -150,7 +150,18 @@ class ChannelsRelationManager extends RelationManager
             ->columns($defaultColumns)
             ->filters([
                 SelectFilter::make('group')
-                    ->options(fn () => $ownerRecord->groupTags()->pluck('name->en', 'name->en')->toArray()),
+                    ->options(function () use ($ownerRecord) {
+                        // groupTags returns a collection of stdClass records with a JSON
+                        // `name` field.  Safely extract the english string value and
+                        // use it for both key and label.
+                        return $ownerRecord->groupTags()
+                            ->get()
+                            ->mapWithKeys(fn ($tag) => [
+                                data_get($tag, 'name.en') => data_get($tag, 'name.en'),
+                            ])
+                            ->filter()
+                            ->toArray();
+                    }),
             ])
             ->recordActions([
                 DetachAction::make()
