@@ -39,6 +39,11 @@ Schedule::command('app:run-scheduled-backups')
     ->everyMinute()
     ->withoutOverlapping();
 
+// Regex sync (reapply patterns / clear EPG cache)
+Schedule::command('app:run-regex-sync')
+    ->everyMinute()
+    ->withoutOverlapping();
+
 // Cleanup logos
 Schedule::command('app:logo-cleanup --force')
     ->daily()

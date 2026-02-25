@@ -842,27 +842,22 @@ class Preferences extends SettingsPage
                                             ->columns(2)
                                             ->schema([
                                                 TextInput::make('auto_backup_database_schedule')
-                                                    ->label('Backup Schedule')
-                                                    ->suffix(config('app.timezone'))
-                                                    ->rules([new Cron])
-                                                    ->live()
-                                                    ->hintAction(
-                                                        Action::make('view_cron_example')
-                                                            ->label('CRON Example')
-                                                            ->icon('heroicon-o-arrow-top-right-on-square')
-                                                            ->iconPosition('after')
-                                                            ->size('sm')
-                                                            ->url('https://crontab.guru')
-                                                            ->openUrlInNewTab(true)
-                                                    )
+                                                    ->label('Backup schedule (cron)')
+                                                    ->hintIcon('heroicon-m-question-mark-circle')
                                                     ->helperText(fn ($get) => CronExpression::isValidExpression($get('auto_backup_database_schedule'))
                                                         ? 'Next scheduled backup: '.(new CronExpression($get('auto_backup_database_schedule')))->getNextRunDate()->format('Y-m-d H:i:s')
-                                                        : 'Specify the CRON schedule for automatic backups, e.g. "0 3 * * *".'),
-                                                TextInput::make('auto_backup_database_max_backups')
-                                                    ->label('Max Backups')
-                                                    ->type('number')
-                                                    ->minValue(0)
-                                                    ->helperText('Specify the maximum number of backups to keep. Enter 0 for no limit.'),
+                                                        : '')
+                                                    ->placeholder('0 3 * * *')
+                                                    ->rules(['nullable', 'string', 'cron']),
+
+                                                TextInput::make('regex_sync_schedule')
+                                                    ->label('Regex sync schedule (cron)')
+                                                    ->hintIcon('heroicon-m-question-mark-circle')
+                                                    ->helperText(fn ($get) => CronExpression::isValidExpression($get('regex_sync_schedule'))
+                                                        ? 'Next regex sync: '.(new CronExpression($get('regex_sync_schedule')))->getNextRunDate()->format('Y-m-d H:i:s')
+                                                        : '')
+                                                    ->placeholder('0 * * * *')
+                                                    ->rules(['nullable', 'string', 'cron']),
                                             ])->hidden(fn ($get) => ! $get('auto_backup_database')),
                                     ]),
                             ]),

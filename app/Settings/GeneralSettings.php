@@ -186,6 +186,13 @@ class GeneralSettings extends Settings
 
     public ?int $auto_backup_database_max_backups = 5;
 
+    // Regex management sync schedule (cron expression).  When set the
+    // `app:run-regex-sync` command will be executed according to this
+    // schedule and will reapply regex patterns/enablement and clear any
+    // associated EPG cache for all playlists that have regex channel
+    // management enabled.
+    public ?string $regex_sync_schedule = null;
+
     // Provider request delay options
     public ?bool $enable_provider_request_delay = false;
 
