@@ -311,7 +311,7 @@ class EpgApiController extends Controller
                         'include_category' => $playlist->dummy_epg_category,
                     ];
 
-                    if (! empty($patternInfo)) {
+                    if (! empty($patternInfo) && $playlist->usesRegexManagement()) {
                         if (! empty($patternInfo['start']) && $patternInfo['start'] instanceof \Carbon\Carbon) {
                             $entry['start'] = str_replace(':', '', $patternInfo['start']->format('YmdHis P'));
                         }
@@ -359,7 +359,7 @@ class EpgApiController extends Controller
                 }
 
                 // If custom playlist, attempt to apply pattern matching
-                if ($playlist instanceof \App\Models\CustomPlaylist) {
+                if ($playlist instanceof \App\Models\CustomPlaylist && $playlist->usesRegexManagement()) {
                     $patternInfo = $playlist->applyEventPattern($channel);
                     if ($patternInfo && ! empty($patternInfo['event'])) {
                         // Update display values

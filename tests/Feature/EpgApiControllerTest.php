@@ -339,9 +339,15 @@ class EpgApiControllerTest extends TestCase
             'is_vod' => false,
             'name' => 'US (ESPN+ 001) | Fairways of Life with Matt Adams Feb 25 9:00AM ET (2026-02-25 09:00:00)',
         ]);
+        // attach the matching tag so getCustomGroupName() returns the group name
+        \Spatie\Tags\Tag::create([
+            'name' => ['en' => $group->name],
+            'type' => $this->playlist->uuid,
+        ])->attachTo($channel);
 
         // Configure the playlist event pattern for this group
         $this->playlist->update([
+            'use_regex_channel_management' => true,
             'event_patterns' => [
                 [
                     'group' => 'Sports',
@@ -413,5 +419,124 @@ class EpgApiControllerTest extends TestCase
 
         $channelId = $channel->channel ?: $channel->id;
         $this->assertEmpty($response->json()['programmes'][$channelId] ?? []);
+    }
+
+    public function test_pattern_only_disables_non_matching_channels()
+    {
+        // set up a simple playlist with two channels
+        $this->playlist->update([
+            'dummy_epg' => false, // not needed for this test
+        ]);
+
+        $group = Group::factory()->create([
+            'name' => 'Test',
+            'user_id' => $this->user->id,
+        ]);
+
+        $matching = Channel::factory()->create([
+            'playlist_id' => $this->playlist->id,
+            'user_id' => $this->user->id,
+            'group_id' => $group->id,
+            'group' => $group->name,
+            'enabled' => true,
+            'is_vod' => false,
+            'name' => 'foo | 2026-02-25 09:00:00',
+        ]);
+        \Spatie\Tags\Tag::create([
+            'name' => ['en' => $group->name],
+            'type' => $this->playlist->uuid,
+        ])->attachTo($matching);
+
+        $nonmatch = Channel::factory()->create([
+            'playlist_id' => $this->playlist->id,
+            'user_id' => $this->user->id,
+            'group_id' => $group->id,
+            'group' => $group->name,
+            'enabled' => true,
+            'is_vod' => false,
+            'name' => 'no date here',
+        ]);
+        \Spatie\Tags\Tag::create([
+            'name' => ['en' => $group->name],
+            'type' => $this->playlist->uuid,
+        ])->attachTo($nonmatch);
+
+        $this->playlist->update([
+            'use_regex_channel_management' => true,
+            'event_patterns' => [
+                [
+                    'group' => 'Test',
+                    'pattern' => '/\|\s*(?P<event>[^|]+)\s*\((?P<start>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\)\s*$/',
+                    'timezone' => 'UTC',
+                    'default_length' => 10,
+                    'disable_if_empty' => true,
+                ],
+            ],
+        ]);
+
+        // apply to both channels
+        $this->assertNotNull($this->playlist->applyEventPattern($matching));
+        $this->assertNull($this->playlist->applyEventPattern($nonmatch));
+
+        $matching->refresh();
+        $nonmatch->refresh();
+
+        $this->assertTrue($matching->enabled);
+        $this->assertFalse($nonmatch->enabled);
+
+        // now make the second channel match as well and re-run
+        $nonmatch->update(['name' => 'bar | 2026-02-25 10:00:00', 'enabled' => false]);
+        $this->assertNotNull($this->playlist->applyEventPattern($nonmatch));
+        $nonmatch->refresh();
+        $this->assertTrue($nonmatch->enabled);
+    }
+
+    public function test_manual_channel_management_ignores_patterns()
+    {
+        // ensure regex management is off
+        $this->playlist->update(['use_regex_channel_management' => false]);
+
+        $group = Group::factory()->create([
+            'name' => 'Sports',
+            'user_id' => $this->user->id,
+        ]);
+
+        $channel = Channel::factory()->create([
+            'playlist_id' => $this->playlist->id,
+            'user_id' => $this->user->id,
+            'group_id' => $group->id,
+            'group' => $group->name,
+            'enabled' => true,
+            'is_vod' => false,
+            'name' => 'US (ESPN+ 001) | Some show (2026-02-25 09:00:00)',
+        ]);
+
+        // write a valid pattern even though it shouldn't be used
+        $this->playlist->update([
+            'event_patterns' => [
+                [
+                    'group' => 'Sports',
+                    'pattern' => '/\|\s*(?P<event>.+?)\s*\((?P<start>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\)\s*$/',
+                    'timezone' => 'UTC',
+                    'default_length' => 60,
+                    'disable_if_empty' => true,
+                ],
+            ],
+        ]);
+
+        // applying pattern manually should still work, but the controller should not
+        $this->assertNotNull($this->playlist->applyEventPattern($channel));
+        $channel->refresh();
+        $this->assertEquals('Some show', $channel->title_custom);
+
+        // now regenerate via API: because regex management is disabled the matcher
+        // should not run, so the channel should remain enabled and keep original
+        // title.
+        $channel->update(['title_custom' => null]);
+        $response = $this->getJson("/api/epg/playlist/{$this->playlist->uuid}/data");
+        $response->assertSuccessful();
+        $channel->refresh();
+        $this->assertNull($channel->title_custom);
+        $this->assertTrue($channel->enabled);
     }
 }

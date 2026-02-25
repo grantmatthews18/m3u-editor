@@ -41,7 +41,8 @@ class ChannelsRelationManager extends RelationManager
 
     public function isReadOnly(): bool
     {
-        return false;
+        $owner = $this->ownerRecord;
+        return (bool) ($owner instanceof \App\Models\CustomPlaylist && $owner->usesRegexManagement());
     }
 
     public static function getTabComponent(Model $ownerRecord, string $pageClass): Tab
@@ -65,6 +66,9 @@ class ChannelsRelationManager extends RelationManager
     public function table(Table $table): Table
     {
         $ownerRecord = $this->ownerRecord;
+
+        // hide attach/detach when regex mode is active
+        $attachHidden = fn (): bool => (bool) ($ownerRecord instanceof \App\Models\CustomPlaylist && $ownerRecord->usesRegexManagement());
 
         $groupColumn = SpatieTagsColumn::make('tags')
             ->label('Playlist Group')
@@ -187,8 +191,10 @@ class ChannelsRelationManager extends RelationManager
                         data: $data,
                         model: $model,
                     ))
-                    ->slideOver(),
+                    ->slideOver()
+                    ->hidden($attachHidden),
                 AttachAction::make()
+                    ->hidden($attachHidden)
                     ->schema(fn (AttachAction $action): array => [
                         $action
                             ->getRecordSelect()
@@ -259,10 +265,11 @@ class ChannelsRelationManager extends RelationManager
                         $record->detachTags($tags);
                         $ownerRecord->channels()->detach($record->id);
                     })
-                    ->size('sm'),
+                    ->size('sm')
+                    ->hidden(fn () => $ownerRecord->usesRegexManagement()),
                 ...ChannelResource::getTableActions(),
             ], position: RecordActionsPosition::BeforeCells)
-            ->toolbarActions([
+            ->toolbarActions(fn () => $ownerRecord->usesRegexManagement() ? [] : [
                 ...ChannelResource::getTableBulkActions(addToCustom: false),
                 BulkAction::make('detach')
                     ->label('Detach Selected')
@@ -321,33 +328,6 @@ class ChannelsRelationManager extends RelationManager
                     ->modalIcon('heroicon-o-squares-plus')
                     ->modalDescription('Add to group')
                     ->modalSubmitActionLabel('Yes, add to group'),
-                BulkAction::make('edit_fields')
-                    ->label('Edit Selected Fields')
-                    ->form([
-                        TextInput::make('name_custom')->label('Custom Name'),
-                        TextInput::make('title_custom')->label('Custom Title'),
-                        TextInput::make('group')->label('Group'),
-                        TextInput::make('channel')->label('Channel Number')->type('number'),
-                        Toggle::make('enabled')->label('Enabled'),
-                    ])
-                    ->action(function (Collection $records, array $data): void {
-                        foreach ($records as $record) {
-                            $update = array_filter($data, fn ($value) => ! is_null($value) && $value !== '');
-                            if (! empty($update)) {
-                                $record->update($update);
-                            }
-                        }
-                    })
-                    ->after(function () {
-                        Notification::make()
-                            ->success()
-                            ->title('Channels updated')
-                            ->body('The selected channels have been updated.')
-                            ->send();
-                    })
-                    ->deselectRecordsAfterCompletion()
-                    ->requiresConfirmation()
-                    ->icon('heroicon-o-pencil-square'),
             ]);
     }
 

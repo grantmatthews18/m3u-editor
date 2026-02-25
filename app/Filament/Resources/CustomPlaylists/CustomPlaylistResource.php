@@ -317,17 +317,28 @@ class CustomPlaylistResource extends Resource
                         ->hidden(fn (Get $get): bool => ! $get('dummy_epg'))
                         ->required(),
                 ]),
-            // new standalone section for event pattern matching
+            // new switch that selects between manual vs regex management
+            Toggle::make('use_regex_channel_management')
+                ->label('Use regex channel management')
+                ->helperText('When enabled, channels are controlled by the patterns below and the playlist table becomes read‑only.  When disabled you may edit channels as normal.')
+                ->inline(false)
+                ->columnSpanFull()
+                ->live(),
+
             Section::make('Event Pattern Matching')
                 ->columnSpanFull()
+                ->visible(fn (Get $get): bool => $get('use_regex_channel_management'))
                 ->schema([
                     \Filament\Forms\Components\Repeater::make('event_patterns')
                         ->label('Patterns by Group')
                         ->columns(1)
                         ->schema([
-                            TextInput::make('group')
+                            Select::make('group')
+                                ->label('Group')
                                 ->required()
-                                ->helperText('Custom group name to which this pattern applies.'),
+                                ->options(fn (?CustomPlaylist $record): array => $record
+                                    ? $record->groupTags()->pluck('name->en', 'name->en')->toArray()
+                                    : []),
                             TextInput::make('pattern')
                                 ->required()
                                 ->helperText('PCRE regex with named groups "event", "start" and optionally "end".'),
@@ -346,6 +357,7 @@ class CustomPlaylistResource extends Resource
                         ->createItemButtonLabel('Add pattern')
                         ->default([]),
                 ]),
+
             Section::make('Streaming Output')
                 ->description('Output processing options')
                 ->columnSpanFull()

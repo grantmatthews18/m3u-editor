@@ -118,7 +118,7 @@ class EpgGenerateController extends Controller
             }
 
             // Apply event pattern if configured (can rename or disable channels)
-            if ($playlist instanceof \App\Models\CustomPlaylist) {
+            if ($playlist instanceof \App\Models\CustomPlaylist && $playlist->usesRegexManagement()) {
                 $patternInfo = $playlist->applyEventPattern($channel);
                 if ($patternInfo && ! empty($patternInfo['event'])) {
                     // make sure tvg/other ids use renamed title if relevant
@@ -224,7 +224,7 @@ class EpgGenerateController extends Controller
                 ];
 
                 // If the pattern produced explicit start/stop times, include them here
-                if (! empty($patternInfo)) {
+                if (! empty($patternInfo) && $playlist->usesRegexManagement()) {
                     if (! empty($patternInfo['start']) && $patternInfo['start'] instanceof \Carbon\Carbon) {
                         $entry['start'] = str_replace(':', '', $patternInfo['start']->format('YmdHis P'));
                     }

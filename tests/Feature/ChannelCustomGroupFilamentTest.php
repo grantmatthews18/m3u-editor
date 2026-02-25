@@ -107,3 +107,33 @@ it('can bulk edit channel fields via relation manager', function () {
     expect($channel1->enabled)->toBeFalse();
     expect($channel2->enabled)->toBeFalse();
 });
+
+it('relation manager becomes read-only when regex management is enabled', function () {
+    $this->customPlaylist->update(['use_regex_channel_management' => true]);
+
+    $channel = Channel::factory()->create([
+        'user_id' => $this->user->id,
+        'title' => 'Foo',
+        'is_vod' => false,
+    ]);
+
+    $this->customPlaylist->channels()->attach($channel->id);
+
+    $relationManager = Livewire::test(ChannelsRelationManager::class, [
+        'ownerRecord' => $this->customPlaylist,
+        'pageClass' => 'App\\Filament\\Resources\\CustomPlaylistResource\\Pages\\EditCustomPlaylist',
+    ]);
+
+    $relationManager
+        ->assertCanSeeTableRecords([$channel])
+        ->assertCanNotSeeTableBulkAction('edit_fields')
+        ->assertCanNotSeeTableBulkAction('add_to_group');
+
+    // attempting to call a bulk action should fail silently or throw
+    // (we don't expect any change to the channel when the playlist is readonly)
+    $relationManager->call('bulkAction', 'edit_fields', [
+        'data' => ['group' => 'x'],
+    ]);
+    $channel->refresh();
+    expect($channel->group)->not->toBe('x');
+});

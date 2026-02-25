@@ -26,6 +26,7 @@ class CustomPlaylistFactory extends Factory
             'id_channel_by' => 'stream_id',
             'user_id' => User::factory(),
             'event_patterns' => [],
+            'use_regex_channel_management' => false,
         ];
     }
 }

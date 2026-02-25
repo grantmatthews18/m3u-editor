@@ -41,6 +41,7 @@ class CustomPlaylist extends Model
         'use_sticky_session' => 'boolean',
         'id_channel_by' => PlaylistChannelId::class,
         'event_patterns' => 'array', // group -> pattern config
+        'use_regex_channel_management' => 'boolean',
     ];
 
     public function user(): BelongsTo
@@ -292,7 +293,9 @@ class CustomPlaylist extends Model
      */
     public function applyEventPattern(Channel $channel): ?array
     {
-        $group = $channel->group ?? $channel->group_internal;
+        // determine the channel's group *within this custom playlist* (tag name)
+        $group = $channel->getCustomGroupName($this->uuid);
+
         $config = $this->getEventPatternForGroup($group);
         if (empty($config) || empty($config['pattern'])) {
             return null;
@@ -315,6 +318,13 @@ class CustomPlaylist extends Model
             }
 
             return null;
+        }
+
+        // At this point we have a match; re-enable the channel if the user asked for
+        // unmatched channels to be disabled.  This covers the case where a channel
+        // was previously disabled by an earlier run and now the pattern succeeds.
+        if (! empty($config['disable_if_empty'])) {
+            $channel->update(['enabled' => true]);
         }
 
         $event = $matches['event'] ?? null;
@@ -357,5 +367,13 @@ class CustomPlaylist extends Model
             'start' => $start,
             'stop' => $stop,
         ];
+    }
+
+    /**
+     * Determine whether this playlist should use regex-based management.
+     */
+    public function usesRegexManagement(): bool
+    {
+        return (bool) $this->use_regex_channel_management;
     }
 }
