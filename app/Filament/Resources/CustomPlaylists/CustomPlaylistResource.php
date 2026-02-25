@@ -336,9 +336,21 @@ class CustomPlaylistResource extends Resource
                             Select::make('group')
                                 ->label('Group')
                                 ->required()
-                                ->options(fn (?CustomPlaylist $record): array => $record
-                                    ? $record->groupTags()->pluck('name->en', 'name->en')->toArray()
-                                    : []),
+                                ->options(function ($record): array {
+                                    $playlist = null;
+
+                                    if ($record instanceof \App\Models\CustomPlaylist) {
+                                        $playlist = $record;
+                                    } elseif (isset($record->id)) {
+                                        $playlist = \App\Models\CustomPlaylist::find($record->id);
+                                    }
+
+                                    if (! $playlist) {
+                                        return [];
+                                    }
+
+                                    return $playlist->groupTags()->pluck('name->en', 'name->en')->toArray();
+                                }),
                             TextInput::make('pattern')
                                 ->required()
                                 ->helperText('PCRE regex with named groups "event", "start" and optionally "end".'),
