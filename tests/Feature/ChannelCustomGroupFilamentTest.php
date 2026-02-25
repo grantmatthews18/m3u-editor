@@ -67,3 +67,43 @@ it('can display channels grouped by custom tags in filament table', function () 
     expect($newsChannel->getCustomGroupName($this->customPlaylist->uuid))->toBe('News');
     expect($uncategorizedChannel->getCustomGroupName($this->customPlaylist->uuid))->toBe('Uncategorized');
 });
+
+it('can bulk edit channel fields via relation manager', function () {
+    // Create a couple of channels and attach them to the custom playlist
+    $channel1 = Channel::factory()->create([
+        'user_id' => $this->user->id,
+        'title' => 'Chan A',
+        'is_vod' => false,
+    ]);
+    $channel2 = Channel::factory()->create([
+        'user_id' => $this->user->id,
+        'title' => 'Chan B',
+        'is_vod' => false,
+    ]);
+
+    $this->customPlaylist->channels()->attach([$channel1->id, $channel2->id]);
+
+    $relationManager = Livewire::test(ChannelsRelationManager::class, [
+        'ownerRecord' => $this->customPlaylist,
+        'pageClass' => 'App\\Filament\\Resources\\CustomPlaylistResource\\Pages\\EditCustomPlaylist',
+    ]);
+
+    // select the two records
+    $relationManager->set('selectedTableRecords', [$channel1->id, $channel2->id]);
+
+    // perform bulk edit: change group and disable
+    $relationManager->call('bulkAction', 'edit_fields', [
+        'data' => [
+            'group' => 'NewGroup',
+            'enabled' => false,
+        ],
+    ]);
+
+    $channel1->refresh();
+    $channel2->refresh();
+
+    expect($channel1->group)->toBe('NewGroup');
+    expect($channel2->group)->toBe('NewGroup');
+    expect($channel1->enabled)->toBeFalse();
+    expect($channel2->enabled)->toBeFalse();
+});

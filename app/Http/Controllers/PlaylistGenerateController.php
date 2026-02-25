@@ -123,6 +123,23 @@ class PlaylistGenerateController extends Controller
                     // Get the title and name
                     $title = $channel->title_custom ?? $channel->title;
                     $name = $channel->name_custom ?? $channel->name;
+
+                    // Apply event pattern matching if configured on custom playlists
+                    if ($playlist instanceof CustomPlaylist) {
+                        $patternInfo = $playlist->applyEventPattern($channel);
+                        if ($patternInfo) {
+                            if (! empty($patternInfo['event'])) {
+                                $title = $patternInfo['event'];
+                                $name = $patternInfo['event'];
+                            }
+                        }
+
+                        // skip disabled channels
+                        if (! $channel->enabled) {
+                            continue;
+                        }
+                    }
+
                     $url = PlaylistUrlService::getChannelUrl($channel, $playlist);
                     // Use selected EPG fields (avoids N+1 query for epgChannel relation)
                     $epgIcon = $channel->epg_icon ?? null;

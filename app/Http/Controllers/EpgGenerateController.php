@@ -117,6 +117,20 @@ class EpgGenerateController extends Controller
                 $channelNo = ++$channelNumber;
             }
 
+            // Apply event pattern if configured (can rename or disable channels)
+            if ($playlist instanceof \App\Models\CustomPlaylist) {
+                $patternInfo = $playlist->applyEventPattern($channel);
+                if ($patternInfo && ! empty($patternInfo['event'])) {
+                    // make sure tvg/other ids use renamed title if relevant
+                    $channel->title_custom = $patternInfo['event'];
+                }
+
+                // skip output if the channel was disabled by the pattern
+                if (! $channel->enabled) {
+                    continue;
+                }
+            }
+
             // Get the `tvg-id` based on the playlist setting
             switch ($idChannelBy) {
                 case PlaylistChannelId::ChannelId:
@@ -198,9 +212,8 @@ class EpgGenerateController extends Controller
                     $icon = LogoProxyController::generateProxyUrl($icon);
                 }
 
-                // Keep track of which channels need a dummy EPG program
-                // Need this to output the <programme> tags later
-                $dummyEpgChannels[] = [
+                // Build base data for this dummy channel
+                $entry = [
                     'tvg_id' => $tvgId,
                     'channel_id' => $channel->id,
                     'channel_no' => $channelNo,
@@ -209,6 +222,20 @@ class EpgGenerateController extends Controller
                     'group' => $channel->group ?? $channel->group_internal,
                     'include_category' => $playlist->dummy_epg_category,
                 ];
+
+                // If the pattern produced explicit start/stop times, include them here
+                if (! empty($patternInfo)) {
+                    if (! empty($patternInfo['start']) && $patternInfo['start'] instanceof \Carbon\Carbon) {
+                        $entry['start'] = str_replace(':', '', $patternInfo['start']->format('YmdHis P'));
+                    }
+                    if (! empty($patternInfo['stop']) && $patternInfo['stop'] instanceof \Carbon\Carbon) {
+                        $entry['stop'] = str_replace(':', '', $patternInfo['stop']->format('YmdHis P'));
+                    }
+                }
+
+                // Keep track of which channels need a dummy EPG program
+                // Need this to output the <programme> tags later
+                $dummyEpgChannels[] = $entry;
 
                 // Output the <channel> tag
                 echo '  <channel id="'.$tvgId.'">'.PHP_EOL;
@@ -384,6 +411,22 @@ class EpgGenerateController extends Controller
                 $icon = $dummyEpgChannel['icon'];
                 $group = $dummyEpgChannel['group'];
                 $includeCategory = $dummyEpgChannel['include_category'];
+
+                // If this channel has explicit start/stop times provided by a pattern,
+                // just output a single programme entry and skip the precomputed slots.
+                if (isset($dummyEpgChannel['start']) && isset($dummyEpgChannel['stop'])) {
+                    echo '  <programme channel="'.$tvgId.'" start="'.$dummyEpgChannel['start'].'" stop="'.$dummyEpgChannel['stop'].'">'.PHP_EOL;
+                    echo '    <title>'.$title.'</title>'.PHP_EOL;
+                    if ($icon) {
+                        echo '    <icon src="'.$icon.'"/>'.PHP_EOL;
+                    }
+                    echo '    <desc>'.$title.'</desc>'.PHP_EOL;
+                    if ($includeCategory) {
+                        echo '    <category lang="en">'.$group.'</category>'.PHP_EOL;
+                    }
+                    echo '  </programme>'.PHP_EOL;
+                    continue;
+                }
 
                 // Build all programmes for this channel in one string buffer
                 $buffer = '';

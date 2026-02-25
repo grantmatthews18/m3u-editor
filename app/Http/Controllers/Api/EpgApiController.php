@@ -300,7 +300,8 @@ class EpgApiController extends Controller
                     }
 
                     // Keep track of which channels need a dummy EPG program
-                    $dummyEpgChannels[] = [
+                    // Need this to output the <programme> tags later
+                    $entry = [
                         'playlist_channel_id' => $channelKey,
                         'display_name' => $channel->title_custom ?? $channel->title,
                         'title' => $channel->name_custom ?? $channel->name,
@@ -309,6 +310,17 @@ class EpgApiController extends Controller
                         'group' => $channel->group ?? $channel->group_internal,
                         'include_category' => $playlist->dummy_epg_category,
                     ];
+
+                    if (! empty($patternInfo)) {
+                        if (! empty($patternInfo['start']) && $patternInfo['start'] instanceof \Carbon\Carbon) {
+                            $entry['start'] = str_replace(':', '', $patternInfo['start']->format('YmdHis P'));
+                        }
+                        if (! empty($patternInfo['stop']) && $patternInfo['stop'] instanceof \Carbon\Carbon) {
+                            $entry['stop'] = str_replace(':', '', $patternInfo['stop']->format('YmdHis P'));
+                        }
+                    }
+
+                    $dummyEpgChannels[] = $entry;
                 }
 
                 // Get the TVG ID
@@ -344,6 +356,20 @@ class EpgApiController extends Controller
                     $channelFormat = 'ts';
                 } else {
                     $channelFormat = $channel->container_extension ?? 'ts';
+                }
+
+                // If custom playlist, attempt to apply pattern matching
+                if ($playlist instanceof \App\Models\CustomPlaylist) {
+                    $patternInfo = $playlist->applyEventPattern($channel);
+                    if ($patternInfo && ! empty($patternInfo['event'])) {
+                        // Update display values
+                        $channel->title_custom = $patternInfo['event'];
+                    }
+                    // skip disabled channels immediately
+                    if (! $channel->enabled) {
+                        // decrement totalChannels or skip further processing
+                        continue;
+                    }
                 }
 
                 // Get the icon
@@ -512,42 +538,43 @@ class EpgApiController extends Controller
                     }
 
                     $title = $dummyEpgChannel['title'];
-                    $displayName = $dummyEpgChannel['display_name'];
                     $icon = $dummyEpgChannel['icon'];
                     $group = $dummyEpgChannel['group'];
                     $includeCategory = $dummyEpgChannel['include_category'];
 
-                    // Generate dummy programmes for the requested date range
-                    $dummyProgrammes = [];
-
-                    // Start from the beginning of the requested start date
-                    $currentTime = Carbon::parse($startDate)->startOfDay();
-                    $endDateTime = Carbon::parse($endDate)->endOfDay();
-
-                    // Generate programmes in chunks of $dummyEpgLength minutes
-                    while ($currentTime->lt($endDateTime)) {
-                        $programmeEnd = (clone $currentTime)->addMinutes($dummyEpgLength);
-
-                        // Format times in ISO 8601 format (matching cache format)
-                        $programme = [
-                            'start' => $currentTime->toIso8601String(),
-                            'stop' => $programmeEnd->toIso8601String(),
+                    // If explicit start/stop defined by pattern, output a single programme entry
+                    if (isset($dummyEpgChannel['start']) && isset($dummyEpgChannel['stop'])) {
+                        $programmes[$playlistChannelId] = [[
+                            'start' => Carbon::parse($dummyEpgChannel['start'])->toIso8601String(),
+                            'stop' => Carbon::parse($dummyEpgChannel['stop'])->toIso8601String(),
                             'title' => $title,
-                            'desc' => $displayName,
+                            'desc' => $title,
                             'icon' => $icon,
-                        ];
-
-                        // Add category if enabled
-                        if ($includeCategory && $group) {
-                            $programme['category'] = $group;
-                        }
-
-                        $dummyProgrammes[] = $programme;
-                        $currentTime = $programmeEnd;
+                            'category' => $includeCategory ? $group : null,
+                        ]];
+                        continue;
                     }
 
-                    // Add to programmes array
-                    $programmes[$playlistChannelId] = $dummyProgrammes;
+                    // Calculate dummy time slots for this channel
+                    $startTime = Carbon::now()->startOf('day')->subMinutes($dummyEpgLength);
+                    $iterations = (int) ((5 * 24 * 60) / $dummyEpgLength);
+
+                    $channelProgrammes = [];
+                    for ($i = 0; $i < $iterations; $i++) {
+                        $startTime->addMinutes($dummyEpgLength);
+                        $endTime = $startTime->copy()->addMinutes($dummyEpgLength);
+
+                        $channelProgrammes[] = [
+                            'start' => $startTime->toIso8601String(),
+                            'stop' => $endTime->toIso8601String(),
+                            'title' => $title,
+                            'desc' => $title,
+                            'icon' => $icon,
+                            'category' => $includeCategory ? $group : null,
+                        ];
+                    }
+
+                    $programmes[$playlistChannelId] = $channelProgrammes;
                 }
             }
 

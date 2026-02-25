@@ -321,4 +321,93 @@ class EpgApiControllerTest extends TestCase
         $stop = Carbon::parse($firstProgramme['stop']);
         $this->assertEquals(60, $start->diffInMinutes($stop));
     }
+
+    public function test_event_pattern_parses_event_and_times_and_renames_channel()
+    {
+        // Create a group and a channel belonging to it
+        $group = Group::factory()->create([
+            'name' => 'Sports',
+            'user_id' => $this->user->id,
+        ]);
+
+        $channel = Channel::factory()->create([
+            'playlist_id' => $this->playlist->id,
+            'user_id' => $this->user->id,
+            'group_id' => $group->id,
+            'group' => $group->name,
+            'enabled' => true,
+            'is_vod' => false,
+            'name' => 'Concert|2026-01-01 20:00',
+        ]);
+
+        // Configure the playlist event pattern for this group
+        $this->playlist->update([
+            'event_patterns' => [
+                $group->name => [
+                    'pattern' => '/^(?P<event>[^|]+)\|(?P<start>\d{4}-\d{2}-\d{2} \d{2}:\d{2})$/',
+                    'timezone' => 'UTC',
+                    'default_length' => 60,
+                    'disable_if_empty' => true,
+                ],
+            ],
+        ]);
+
+        $response = $this->getJson("/api/epg/playlist/{$this->playlist->uuid}/data");
+        $response->assertSuccessful();
+        $data = $response->json();
+
+        $channel->refresh();
+        $this->assertEquals('Concert', $channel->title_custom);
+
+        $channelId = $channel->channel ?: $channel->id;
+        $programmes = $data['programmes'][$channelId] ?? [];
+        $this->assertCount(1, $programmes);
+
+        $firstProgramme = $programmes[0];
+        $this->assertEquals('Concert', $firstProgramme['title']);
+        $this->assertEquals('Concert', $firstProgramme['desc']);
+
+        // verify duration is 60 minutes
+        $start = Carbon::parse($firstProgramme['start']);
+        $stop = Carbon::parse($firstProgramme['stop']);
+        $this->assertEquals(60, $start->diffInMinutes($stop));
+    }
+
+    public function test_event_pattern_disables_channel_when_no_match()
+    {
+        $group = Group::factory()->create([
+            'user_id' => $this->user->id,
+            'name' => 'Sports',
+        ]);
+
+        $channel = Channel::factory()->create([
+            'playlist_id' => $this->playlist->id,
+            'user_id' => $this->user->id,
+            'group_id' => $group->id,
+            'group' => 'Sports',
+            'name' => 'Unrelated Title',
+            'enabled' => true,
+            'is_vod' => false,
+        ]);
+
+        $this->playlist->update([
+            'event_patterns' => [
+                'Sports' => [
+                    'pattern' => '/^Event:(?P<event>[^|]+)\|Start:(?P<start>\d{4}-\d{2}-\d{2} \d{2}:\d{2})$/',
+                    'timezone' => 'UTC',
+                    'default_length' => 45,
+                    'disable_if_empty' => true,
+                ],
+            ],
+        ]);
+
+        $response = $this->getJson("/api/epg/playlist/{$this->playlist->uuid}/data");
+        $response->assertSuccessful();
+
+        $channel->refresh();
+        $this->assertFalse($channel->enabled);
+
+        $channelId = $channel->channel ?: $channel->id;
+        $this->assertEmpty($response->json()['programmes'][$channelId] ?? []);
+    }
 }

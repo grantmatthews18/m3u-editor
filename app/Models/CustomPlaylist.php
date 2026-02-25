@@ -12,6 +12,8 @@ use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\MorphToMany;
 use Spatie\Tags\HasTags;
+use App\Models\Channel;
+use Carbon\Carbon;
 
 class CustomPlaylist extends Model
 {
@@ -38,6 +40,7 @@ class CustomPlaylist extends Model
         'strict_live_ts' => 'boolean',
         'use_sticky_session' => 'boolean',
         'id_channel_by' => PlaylistChannelId::class,
+        'event_patterns' => 'array', // group -> pattern config
     ];
 
     public function user(): BelongsTo
@@ -235,5 +238,102 @@ class CustomPlaylist extends Model
                 return $value;
             }
         );
+    }
+
+    /**
+     * Retrieve the event pattern configuration for a given channel group.
+     *
+     * @param  string|null  $group
+     * @return array|null
+     */
+    public function getEventPatternForGroup(?string $group): ?array
+    {
+        if (empty($group)) {
+            return null;
+        }
+
+        $patterns = $this->event_patterns ?? [];
+        if (! is_array($patterns)) {
+            return null;
+        }
+
+        return $patterns[$group] ?? null;
+    }
+
+    /**
+     * Attempt to apply the configured event pattern to the provided channel.
+     *
+     * This will optionally update the channel title and/or disable the channel
+     * depending on the pattern configuration. Returns an array containing
+     * parsed event data (event, start, stop) when a match is found, or null
+     * otherwise.
+     *
+     * @param  \App\Models\Channel  $channel
+     * @return array|null
+     */
+    public function applyEventPattern(Channel $channel): ?array
+    {
+        $group = $channel->group ?? $channel->group_internal;
+        $config = $this->getEventPatternForGroup($group);
+        if (empty($config) || empty($config['pattern'])) {
+            return null;
+        }
+
+        // ensure the regex is valid
+        $regex = $config['pattern'];
+        $matches = [];
+        if (@preg_match($regex, '') === false) {
+            // invalid regex, skip
+            return null;
+        }
+
+        if (! preg_match($regex, $channel->name ?? '', $matches)) {
+            if (! empty($config['disable_if_empty'])) {
+                $channel->update(['enabled' => false]);
+            }
+
+            return null;
+        }
+
+        $event = $matches['event'] ?? null;
+        $startStr = $matches['start'] ?? null;
+        $endStr = $matches['end'] ?? null;
+
+        $timezone = $config['timezone'] ?? null;
+        $defaultLength = (int) ($config['default_length'] ?? 120);
+
+        $start = null;
+        $stop = null;
+
+        try {
+            if ($startStr) {
+                $start = Carbon::parse($startStr, $timezone);
+            }
+        } catch (\Exception $e) {
+            $start = null;
+        }
+
+        if ($endStr) {
+            try {
+                $stop = Carbon::parse($endStr, $timezone);
+            } catch (\Exception $e) {
+                $stop = null;
+            }
+        }
+
+        if (! $stop && $start) {
+            $stop = $start->copy()->addMinutes($defaultLength);
+        }
+
+        // rename the channel if event name provided
+        if ($event) {
+            $channel->update(['title_custom' => $event]);
+        }
+
+        return [
+            'event' => $event,
+            'start' => $start,
+            'stop' => $stop,
+        ];
     }
 }

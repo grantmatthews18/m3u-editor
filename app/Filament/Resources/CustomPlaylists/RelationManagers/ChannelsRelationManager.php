@@ -10,6 +10,8 @@ use Filament\Actions\CreateAction;
 use Filament\Actions\DetachAction;
 use Filament\Forms;
 use Filament\Forms\Components\Select;
+use Filament\Forms\Components\TextInput;
+use Filament\Forms\Components\Toggle;
 use Filament\Notifications\Notification;
 use Filament\Resources\RelationManagers\RelationManager;
 use Filament\Schemas\Components\Tabs\Tab;
@@ -319,6 +321,33 @@ class ChannelsRelationManager extends RelationManager
                     ->modalIcon('heroicon-o-squares-plus')
                     ->modalDescription('Add to group')
                     ->modalSubmitActionLabel('Yes, add to group'),
+                BulkAction::make('edit_fields')
+                    ->label('Edit Selected Fields')
+                    ->form([
+                        TextInput::make('name_custom')->label('Custom Name'),
+                        TextInput::make('title_custom')->label('Custom Title'),
+                        TextInput::make('group')->label('Group'),
+                        TextInput::make('channel')->label('Channel Number')->type('number'),
+                        Toggle::make('enabled')->label('Enabled'),
+                    ])
+                    ->action(function (Collection $records, array $data): void {
+                        foreach ($records as $record) {
+                            $update = array_filter($data, fn ($value) => ! is_null($value) && $value !== '');
+                            if (! empty($update)) {
+                                $record->update($update);
+                            }
+                        }
+                    })
+                    ->after(function () {
+                        Notification::make()
+                            ->success()
+                            ->title('Channels updated')
+                            ->body('The selected channels have been updated.')
+                            ->send();
+                    })
+                    ->deselectRecordsAfterCompletion()
+                    ->requiresConfirmation()
+                    ->icon('heroicon-o-pencil-square'),
             ]);
     }
 

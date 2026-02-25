@@ -25,6 +25,7 @@ class CustomPlaylistFactory extends Factory
             'uuid' => $this->faker->uuid(),
             'id_channel_by' => 'stream_id',
             'user_id' => User::factory(),
+            'event_patterns' => [],
         ];
     }
 }
