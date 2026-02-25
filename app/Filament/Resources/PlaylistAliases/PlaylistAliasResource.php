@@ -28,6 +28,7 @@ use Filament\Tables\Table;
 use Illuminate\Contracts\Support\Htmlable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Validation\Rule;
 
 class PlaylistAliasResource extends Resource
@@ -113,7 +114,16 @@ class PlaylistAliasResource extends Resource
                     ->toggleable()
                     ->formatStateUsing(fn (int $state): string => $state === 0 ? '∞' : (string) $state)
                     ->tooltip('Total streams available for this playlist (∞ indicates no limit)')
-                    ->description(fn (PlaylistAlias $record): string => 'Active: '.M3uProxyService::getPlaylistActiveStreamsCount($record)),
+                    ->description(function (PlaylistAlias $record): string {
+                        // Cache active streams count for 5 seconds to reduce load
+                        $count = Cache::remember(
+                            "alias_active_streams_{$record->id}",
+                            5,
+                            fn () => M3uProxyService::getPlaylistActiveStreamsCount($record)
+                        );
+
+                        return "Active: {$count}";
+                    }),
                 Tables\Columns\TextColumn::make('live_count')
                     ->label('Live')
                     ->description(fn (PlaylistAlias $record): string => "Enabled: {$record->enabled_live_channels()->count()}")
@@ -345,6 +355,7 @@ class PlaylistAliasResource extends Resource
 
             Schemas\Components\Fieldset::make('Proxy Options')
                 ->columns(2)
+                ->hidden(fn () => ! auth()->user()->canUseProxy())
                 ->schema([
                     Forms\Components\Toggle::make('enable_proxy')
                         ->label('Enable Stream Proxy')
@@ -384,26 +395,45 @@ class PlaylistAliasResource extends Resource
                         ->default(0) // Default to 0 streams (for unlimted)
                         ->required()
                         ->hidden(fn (Get $get): bool => ! $get('enable_proxy')),
-                    Forms\Components\TextInput::make('server_timezone')
-                        ->label('Provider Timezone')
-                        ->helperText('The portal/provider timezone (DST-aware). Needed to correctly use timeshift functionality when playlist proxy is enabled.')
-                        ->placeholder('Etc/UTC')
-                        ->hidden(fn (Get $get): bool => ! $get('enable_proxy')),
-                    Forms\Components\Toggle::make('strict_live_ts')
-                        ->label('Enable Strict Live TS Handling')
-                        ->hintAction(
-                            Actions\Action::make('learn_more_strict_live_ts')
-                                ->label('Learn More')
-                                ->icon('heroicon-o-arrow-top-right-on-square')
-                                ->iconPosition('after')
-                                ->size('sm')
-                                ->url('https://github.com/sparkison/m3u-proxy/blob/master/docs/STRICT_LIVE_TS_MODE.md')
-                                ->openUrlInNewTab(true)
-                        )
-                        ->helperText('Enhanced stability for live MPEG-TS streams with PVR clients like Kodi and HDHomeRun (only used when not using transcoding profiles).')
-                        ->inline(false)
-                        ->default(false)
-                        ->hidden(fn (Get $get): bool => ! $get('enable_proxy')),
+
+                    Grid::make()
+                        ->columns(1)
+                        ->schema([
+                            Forms\Components\TextInput::make('server_timezone')
+                                ->label('Provider Timezone')
+                                ->helperText('The portal/provider timezone (DST-aware). Needed to correctly use timeshift functionality when playlist proxy is enabled.')
+                                ->placeholder('Etc/UTC'),
+                            Forms\Components\Toggle::make('strict_live_ts')
+                                ->label('Enable Strict Live TS Handling')
+                                ->hintAction(
+                                    Actions\Action::make('learn_more_strict_live_ts')
+                                        ->label('Learn More')
+                                        ->icon('heroicon-o-arrow-top-right-on-square')
+                                        ->iconPosition('after')
+                                        ->size('sm')
+                                        ->url('https://github.com/sparkison/m3u-proxy/blob/master/docs/STRICT_LIVE_TS_MODE.md')
+                                        ->openUrlInNewTab(true)
+                                )
+                                ->helperText('Enhanced stability for live MPEG-TS streams with PVR clients like Kodi and HDHomeRun (only used when not using transcoding profiles).')
+                                ->inline(false)
+                                ->default(false),
+                            Forms\Components\Toggle::make('use_sticky_session')
+                                ->label('Enable Sticky Session Handler')
+                                ->hintAction(
+                                    Actions\Action::make('learn_more_sticky_session')
+                                        ->label('Learn More')
+                                        ->icon('heroicon-o-arrow-top-right-on-square')
+                                        ->iconPosition('after')
+                                        ->size('sm')
+                                        ->url('https://github.com/sparkison/m3u-proxy/blob/master/docs/STICKY_SESSION.md')
+                                        ->openUrlInNewTab(true)
+                                )
+                                ->helperText('')
+                                ->inline(false)
+                                ->default(false)
+                                ->helperText('Lock clients to specific backend origins after redirects to prevent playback loops when load balancers bounce between origins. Disable if your provider doesn\'t use load balancing.'),
+                        ])->hidden(fn (Get $get): bool => ! $get('enable_proxy')),
+
                     Schemas\Components\Fieldset::make('Transcoding Settings (optional)')
                         ->columnSpanFull()
                         ->schema([

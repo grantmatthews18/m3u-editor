@@ -240,10 +240,6 @@ class ProcessM3uImportComplete implements ShouldQueue
         $removedGroups->delete();
         $removedChannels->delete();
 
-        // Flag new groups and channels as not new
-        $newGroups->update(['new' => false]);
-        $newChannels->update(['new' => false]);
-
         // Finally, clean up orphaned channels (non-custom channels with null or non-existent group_id)
         Channel::where('playlist_id', $playlist->id)
             ->where('is_custom', false)
@@ -298,14 +294,17 @@ class ProcessM3uImportComplete implements ShouldQueue
         // Update the playlist
         $update = [
             'status' => Status::Completed,
-            'channels' => 0, // not using...
+            'channels' => 0,
             'synced' => now(),
             'errors' => null,
             'sync_time' => $completedIn,
+            'auto_retry_503_count' => 0,
+            'auto_retry_503_last_at' => null,
             'processing' => [
                 ...$playlist->processing ?? [],
                 'live_processing' => false,
                 'vod_processing' => false,
+                'series_processing' => false,
             ],
         ];
         if ($this->runningLiveImport) {
@@ -392,8 +391,8 @@ class ProcessM3uImportComplete implements ShouldQueue
             return; // Exit early if series import is enabled, sync complete event will be fired after series import completes
         }
 
-        // Fire the playlist synced event
-        event(new SyncCompleted($playlist));
+        // Fire the playlist synced event with new channel IDs for auto-merge
+        event(new SyncCompleted($playlist, 'playlist'));
     }
 
     /**

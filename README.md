@@ -29,6 +29,10 @@ Join our [Discord](https://discord.gg/rS3abJ5dz7) server to ask questions and ge
 Check out the docs: [m3u editor docs](https://sparkison.github.io/m3u-editor-docs/) (we could use some help with this one...)
 
 ## 🐳 Docker quick start <sup><small><code>v0.8.x+</code></small></sup>
+> [!IMPORTANT]
+> - **Default Username:** admin
+> - **Default password:** admin
+> - **Default port:** 36400
 
 | Use Case                    | File                                                    | Description                                                                                            |
 | --------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
@@ -74,6 +78,10 @@ Here’s how you can join the party:
 - Be respectful, helpful, and open-minded.
 - Respect the **CC BY-NC-SA license**.
 
+1. Fork the repository
+2. Create a feature branch
+3. Add tests for new functionality
+4. Submit a pull request
 
 ---
 
@@ -86,3 +94,4 @@ Here’s how you can join the party:
 - **SA**: Share alike if you remix.  
 
 For full license details, see [LICENSE](https://creativecommons.org/licenses/by-nc-sa/4.0/).
+

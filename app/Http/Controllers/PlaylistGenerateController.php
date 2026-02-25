@@ -8,6 +8,7 @@ use App\Facades\PlaylistFacade;
 use App\Facades\ProxyFacade;
 use App\Models\Channel;
 use App\Models\CustomPlaylist;
+use App\Models\Network;
 use App\Models\Playlist;
 use App\Models\PlaylistAlias;
 use App\Services\PlaylistUrlService;
@@ -21,6 +22,11 @@ class PlaylistGenerateController extends Controller
         $playlist = PlaylistFacade::resolvePlaylistByUuid($uuid);
         if (! $playlist) {
             return response()->json(['Error' => 'Playlist Not Found'], 404);
+        }
+
+        // Handle network playlists separately
+        if ($playlist instanceof \App\Models\Playlist && $playlist->is_network_playlist) {
+            return $this->generateNetworkPlaylist($request, $playlist);
         }
 
         switch (class_basename($playlist)) {
@@ -80,6 +86,13 @@ class PlaylistGenerateController extends Controller
         } else {
             $proxyEnabled = $playlist->enable_proxy;
         }
+
+        // Check if user has permission to use proxy
+        // If not, force proxy to be disabled regardless of settings
+        if ($proxyEnabled && ! $playlist->user->canUseProxy()) {
+            $proxyEnabled = false;
+        }
+
         $logoProxyEnabled = $playlist->enable_logo_proxy;
 
         // Get the base URL
@@ -119,7 +132,7 @@ class PlaylistGenerateController extends Controller
                     $stationId = $channel->station_id ?? '';
                     $epgShift = $channel->tvg_shift ?? 0;
                     $group = $channel->group ?? '';
-                    if (! $channelNo && $playlist->auto_channel_increment) {
+                    if (! $channelNo && ($playlist->auto_channel_increment || $idChannelBy === PlaylistChannelId::Number)) {
                         $channelNo = ++$channelNumber;
                     }
                     if ($type === 'custom') {
@@ -134,7 +147,10 @@ class PlaylistGenerateController extends Controller
                     // Get the TVG ID
                     switch ($idChannelBy) {
                         case PlaylistChannelId::ChannelId:
-                            $tvgId = $channel->source_id ?? $channel->id;
+                            $tvgId = $channel->id;
+                            break;
+                        case PlaylistChannelId::Number:
+                            $tvgId = $channelNumber;
                             break;
                         case PlaylistChannelId::Name:
                             $tvgId = $channel->name_custom ?? $channel->name;
@@ -143,7 +159,7 @@ class PlaylistGenerateController extends Controller
                             $tvgId = $channel->title_custom ?? $channel->title;
                             break;
                         default:
-                            $tvgId = $channel->stream_id_custom ?? $channel->stream_id;
+                            $tvgId = $channel->source_id ?? $channel->stream_id_custom ?? $channel->stream_id;
                             break;
                     }
 
@@ -167,10 +183,14 @@ class PlaylistGenerateController extends Controller
                     }
 
                     // Get the extension from the source URL
-                    $extension = pathinfo($url, PATHINFO_EXTENSION);
+                    // Need to get clean URL first (in case URL variables are used that might not have an extension, e.g. /stream/{id})
+                    $filename = parse_url($url, PHP_URL_PATH);
+                    $extension = pathinfo($filename, PATHINFO_EXTENSION);
                     if (empty($extension)) {
                         $sourcePlaylist = $channel->getEffectivePlaylist();
-                        $extension = $sourcePlaylist->xtream_config['output'] ?? 'ts'; // Default to 'ts' if not set
+                        if ($sourcePlaylist?->xtream) {
+                            $extension = $sourcePlaylist->xtream_config['output'] ?? 'ts'; // Default to 'ts' if not set
+                        }
                     }
 
                     if ($logoProxyEnabled) {
@@ -188,13 +208,6 @@ class PlaylistGenerateController extends Controller
                             $extension = $channel->container_extension ?? 'mkv';
                         }
                         $url = $baseUrl."/{$urlPath}/{$username}/{$password}/".$channel->id.'.'.$extension;
-                    } elseif ($proxyEnabled) {
-                        // Get the proxy URL
-                        // Pass the playlist UUID for merged/custom playlists so the correct context is used
-                        $url = ProxyFacade::getProxyUrlForChannel(
-                            $channel->id,
-                            $playlist->uuid
-                        );
                     }
                     $url = rtrim($url, '.');
 
@@ -281,7 +294,10 @@ class PlaylistGenerateController extends Controller
                             // Get the TVG ID
                             switch ($idChannelBy) {
                                 case PlaylistChannelId::ChannelId:
-                                    $tvgId = $channel->source_id ?? $channel->id;
+                                    $tvgId = $episode->id;
+                                    break;
+                                case PlaylistChannelId::Number:
+                                    $tvgId = $channelNumber;
                                     break;
                                 case PlaylistChannelId::Name:
                                     $tvgId = $name;
@@ -301,6 +317,9 @@ class PlaylistGenerateController extends Controller
                         }
                     }
                 }
+
+                // Networks are now synced as actual Channel records with network_id
+                // They will be included automatically in the channel query above
             },
             200,
             [
@@ -312,7 +331,7 @@ class PlaylistGenerateController extends Controller
         );
     }
 
-    public function hdhr(string $uuid)
+    public function hdhr(Request $request, string $uuid, ?string $username = null, ?string $password = null)
     {
         // Fetch the playlist so we can send a 404 if not found
         $playlist = PlaylistFacade::resolvePlaylistByUuid($uuid);
@@ -320,10 +339,16 @@ class PlaylistGenerateController extends Controller
             return response()->json(['Error' => 'Playlist Not Found'], 404);
         }
 
-        // Setup the HDHR device info
-        $deviceInfo = $this->getDeviceInfo($playlist);
+        // Setup the HDHR device info (pass through optional path auth)
+        $deviceInfo = $this->getDeviceInfo($request, $playlist, $username, $password);
+        // Ensure XML special characters are escaped (e.g., '&' -> '&amp;') to avoid parser errors
         $deviceInfoXml = collect($deviceInfo)->map(function ($value, $key) {
-            return "<$key>$value</$key>";
+            if (is_array($value)) {
+                $value = implode(',', $value);
+            }
+            $value = htmlspecialchars((string) $value, ENT_XML1 | ENT_QUOTES, 'UTF-8');
+
+            return "<{$key}>{$value}</{$key}>";
         })->implode('');
         $xmlResponse = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><root>$deviceInfoXml</root>";
 
@@ -331,7 +356,7 @@ class PlaylistGenerateController extends Controller
         return response($xmlResponse)->header('Content-Type', 'application/xml');
     }
 
-    public function hdhrOverview(Request $request, string $uuid)
+    public function hdhrOverview(Request $request, string $uuid, ?string $username = null, ?string $password = null)
     {
         // Fetch the playlist so we can send a 404 if not found
         $playlist = PlaylistFacade::resolvePlaylistByUuid($uuid);
@@ -339,7 +364,10 @@ class PlaylistGenerateController extends Controller
             return response()->json(['Error' => 'Playlist Not Found'], 404);
         }
 
-        // Check auth
+        // Check auth (prefer path-based auth if present)
+        $providedUsername = $username ?? $request->get('username');
+        $providedPassword = $password ?? $request->get('password');
+
         if ($playlist instanceof PlaylistAlias) {
             $auth = $playlist->authObject;
             if ($auth) {
@@ -358,8 +386,8 @@ class PlaylistGenerateController extends Controller
                 $authPassword = $auth->password;
 
                 if (
-                    $request->get('username') === $authUsername &&
-                    $request->get('password') === $authPassword
+                    $providedUsername === $authUsername &&
+                    $providedPassword === $authPassword
                 ) {
                     $authenticated = true;
                     $usedAuth = $auth;
@@ -377,7 +405,7 @@ class PlaylistGenerateController extends Controller
         ]);
     }
 
-    public function hdhrDiscover(string $uuid)
+    public function hdhrDiscover(Request $request, string $uuid, ?string $username = null, ?string $password = null)
     {
         // Fetch the playlist so we can send a 404 if not found
         $playlist = PlaylistFacade::resolvePlaylistByUuid($uuid);
@@ -385,11 +413,11 @@ class PlaylistGenerateController extends Controller
             return response()->json(['Error' => 'Playlist Not Found'], 404);
         }
 
-        // Return the HDHR device info
-        return $this->getDeviceInfo($playlist);
+        // Return the HDHR device info (pass through optional path auth)
+        return $this->getDeviceInfo($request, $playlist, $username, $password);
     }
 
-    public function hdhrLineup(string $uuid)
+    public function hdhrLineup(Request $request, string $uuid, ?string $username = null, ?string $password = null)
     {
         // Fetch the playlist
         $playlist = PlaylistFacade::resolvePlaylistByUuid($uuid);
@@ -400,9 +428,51 @@ class PlaylistGenerateController extends Controller
         // Build the channel query
         $channels = self::getChannelQuery($playlist);
 
+        // Check auth (prefer path-based auth if present)
+        $providedUsername = $username ?? $request->get('username');
+        $providedPassword = $password ?? $request->get('password');
+
+        $usedAuth = null;
+        if ($playlist instanceof PlaylistAlias) {
+            $auth = $playlist->authObject;
+            if ($auth) {
+                $auths = collect([$auth]);
+            } else {
+                $auths = collect();
+            }
+        } else {
+            $auths = $playlist->playlistAuths()->where('enabled', true)->get();
+        }
+
+        if ($auths->isNotEmpty()) {
+            $authenticated = false;
+            foreach ($auths as $auth) {
+                $authUsername = $auth->username;
+                $authPassword = $auth->password;
+
+                if (
+                    $providedUsername === $authUsername &&
+                    $providedPassword === $authPassword
+                ) {
+                    $authenticated = true;
+                    $usedAuth = $auth;
+                    break;
+                }
+            }
+
+            if (! $authenticated) {
+                return response()->json(['Error' => 'Unauthorized'], 401);
+            }
+        }
+
         // Set the auth details
-        $username = $playlist->user->name;
-        $password = $playlist->uuid;
+        if ($usedAuth) {
+            $username = $usedAuth->username;
+            $password = $usedAuth->password;
+        } else {
+            $username = $playlist->user->name;
+            $password = $playlist->uuid;
+        }
 
         // Check if proxy enabled
         $idChannelBy = $playlist->id_channel_by;
@@ -429,14 +499,17 @@ class PlaylistGenerateController extends Controller
                 }
                 $url = rtrim($baseUrl."/{$urlPath}/{$username}/{$password}/".$channel->id.'.'.$extension, '.');
                 $channelNo = $channel->channel;
-                if (! $channelNo && $autoIncrement) {
+                if (! $channelNo && ($autoIncrement || $idChannelBy === PlaylistChannelId::Number)) {
                     $channelNo = ++$channelNumber;
                 }
 
                 // Get the TVG ID
                 switch ($idChannelBy) {
                     case PlaylistChannelId::ChannelId:
-                        $tvgId = $channel->source_id ?? $channel->id;
+                        $tvgId = $channel->id;
+                        break;
+                    case PlaylistChannelId::Number:
+                        $tvgId = $channelNumber;
                         break;
                     case PlaylistChannelId::Name:
                         $tvgId = $channel->name_custom ?? $channel->name;
@@ -445,7 +518,7 @@ class PlaylistGenerateController extends Controller
                         $tvgId = $channel->title_custom ?? $channel->title;
                         break;
                     default:
-                        $tvgId = $channel->stream_id_custom ?? $channel->stream_id;
+                        $tvgId = $channel->source_id ?? $channel->stream_id_custom ?? $channel->stream_id;
                         break;
                 }
 
@@ -470,7 +543,7 @@ class PlaylistGenerateController extends Controller
         }, 200, $headers);
     }
 
-    public function hdhrLineupStatus(string $uuid)
+    public function hdhrLineupStatus(Request $request, string $uuid)
     {
         // No need to fetch, status is same for all...
         return response()->json([
@@ -481,8 +554,39 @@ class PlaylistGenerateController extends Controller
         ]);
     }
 
-    private function getDeviceInfo($playlist)
+    private function getDeviceInfo(Request $request, $playlist, ?string $username = null, ?string $password = null)
     {
+        // Check auth (prefer path-based auth if present)
+        $usedAuth = null;
+        $providedUsername = $username ?? $request->get('username');
+        $providedPassword = $password ?? $request->get('password');
+
+        if ($playlist instanceof PlaylistAlias) {
+            $auth = $playlist->authObject;
+            if ($auth) {
+                $auths = collect([$auth]);
+            } else {
+                $auths = collect();
+            }
+        } else {
+            $auths = $playlist->playlistAuths()->where('enabled', true)->get();
+        }
+
+        if ($auths->isNotEmpty()) {
+            foreach ($auths as $auth) {
+                $authUsername = $auth->username;
+                $authPassword = $auth->password;
+
+                if (
+                    $providedUsername === $authUsername &&
+                    $providedPassword === $authPassword
+                ) {
+                    $usedAuth = $auth;
+                    break;
+                }
+            }
+        }
+
         // Return the HDHR device info
         $uuid = $playlist->uuid;
         $tunerCount = (int) $playlist->streams === 0
@@ -493,6 +597,12 @@ class PlaylistGenerateController extends Controller
         $baseUrl = ProxyFacade::getBaseUrl();
         $baseUrl = $baseUrl."/{$uuid}/hdhr";
 
+        // Prefer path-based auth for HDHR (clients typically ignore query strings)
+        $authPath = '';
+        if ($usedAuth) {
+            $authPath = '/'.rawurlencode($usedAuth->username).'/'.rawurlencode($usedAuth->password);
+        }
+
         return [
             'DeviceID' => $deviceId,
             'FriendlyName' => "{$playlist->name} HDHomeRun",
@@ -500,16 +610,14 @@ class PlaylistGenerateController extends Controller
             'FirmwareName' => 'hdhomerun5_firmware_20240425',
             'FirmwareVersion' => '20240425',
             'DeviceAuth' => 'test_auth_token',
-            'BaseURL' => $baseUrl,
-            'LineupURL' => "$baseUrl/lineup.json",
+            'BaseURL' => $baseUrl.$authPath,
+            'LineupURL' => $baseUrl.$authPath.'/lineup.json',
             'TunerCount' => $tunerCount,
         ];
     }
 
     /**
      * Build the base query for channels for a playlist.
-     *
-     * @param  Playlist  $playlist
      */
     public static function getChannelQuery($playlist): mixed
     {
@@ -530,6 +638,7 @@ class PlaylistGenerateController extends Controller
 
         // Join EPG channel data to avoid N+1 queries and select common fields
         $query->leftJoin('epg_channels', 'channels.epg_channel_id', '=', 'epg_channels.id')
+            ->selectRaw('epg_channels.epg_id as epg_id')
             ->selectRaw('epg_channels.icon as epg_icon')
             ->selectRaw('epg_channels.icon_custom as epg_icon_custom')
             // Alias the external EPG channel identifier to avoid clobbering the FK attribute
@@ -567,5 +676,56 @@ class PlaylistGenerateController extends Controller
         }
 
         return $query;
+    }
+
+    /**
+     * Generate M3U output for a network playlist (outputs networks instead of channels).
+     */
+    protected function generateNetworkPlaylist(Request $request, \App\Models\Playlist $playlist)
+    {
+        $networks = $playlist->networks()
+            ->where('enabled', true)
+            ->orderBy('channel_number')
+            ->orderBy('name')
+            ->get();
+
+        if ($networks->isEmpty()) {
+            return response("#EXTM3U\n# No networks assigned to this playlist\n", 200, [
+                'Content-Type' => 'audio/x-mpegurl',
+            ]);
+        }
+
+        $baseUrl = url('/');
+
+        return response()->stream(function () use ($networks, $baseUrl, $playlist) {
+            // M3U header with EPG URL
+            $epgUrl = route('epg.generate', ['uuid' => $playlist->uuid]);
+            echo "#EXTM3U x-tvg-url=\"{$epgUrl}\"\n";
+
+            foreach ($networks as $network) {
+                $name = $network->name;
+                $channelNumber = $network->channel_number ?? $network->id;
+                $tvgId = "network-{$network->id}";
+                $logo = $network->logo ?? "{$baseUrl}/placeholder.png";
+                $group = 'Networks';
+                $streamUrl = $network->stream_url;
+
+                // Build EXTINF line
+                $extInf = '#EXTINF:-1';
+                $extInf .= " tvg-chno=\"{$channelNumber}\"";
+                $extInf .= " tvg-id=\"{$tvgId}\"";
+                $extInf .= " tvg-name=\"{$name}\"";
+                $extInf .= " tvg-logo=\"{$logo}\"";
+                $extInf .= " group-title=\"{$group}\"";
+                $extInf .= ",{$name}";
+
+                echo "{$extInf}\n";
+                echo "{$streamUrl}\n";
+            }
+        }, 200, [
+            'Content-Type' => 'audio/x-mpegurl',
+            'Content-Disposition' => 'inline; filename="'.$playlist->name.'.m3u"',
+            'Cache-Control' => 'no-cache, no-store, must-revalidate',
+        ]);
     }
 }

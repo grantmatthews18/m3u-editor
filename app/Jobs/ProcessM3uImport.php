@@ -2,11 +2,13 @@
 
 namespace App\Jobs;
 
+use App\Enums\PlaylistSourceType;
 use App\Enums\Status;
 use App\Events\SyncCompleted;
 use App\Models\Category;
 use App\Models\Group;
 use App\Models\Job;
+use App\Models\MediaServerIntegration;
 use App\Models\Playlist;
 use App\Models\SourceCategory;
 use App\Models\SourceGroup;
@@ -17,6 +19,7 @@ use Exception;
 use Filament\Notifications\Notification;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
+use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Http;
@@ -87,6 +90,12 @@ class ProcessM3uImport implements ShouldQueue
     // Groups we should auto-enable channels for
     public Collection $enabledGroups;
 
+    // EPG mapping enabled by default
+    public bool $epgMapEnabled = true;
+
+    // Merging enabled by default
+    public bool $canMergeEnabled = true;
+
     // Categories we should auto-enable series for
     public Collection $enabledCategories;
 
@@ -118,6 +127,14 @@ class ProcessM3uImport implements ShouldQueue
         $this->selectedCategories = $playlist->import_prefs['selected_categories'] ?? [];
         $this->includedCategoryPrefixes = $playlist->import_prefs['included_category_prefixes'] ?? [];
 
+        // See if channel options set
+        if ($this->playlist->enable_channels ?? false) {
+            $epgMapEnabled = $playlist->import_prefs['channel_default_mapping_enabled'] ?? null;
+            $canMergeEnabled = $playlist->import_prefs['channel_default_merge_enabled'] ?? null;
+            $this->epgMapEnabled = $epgMapEnabled !== null ? $epgMapEnabled : true;
+            $this->canMergeEnabled = $canMergeEnabled !== null ? $canMergeEnabled : true;
+        }
+
         // Get the enabled groups and categories for this playlist
         $this->enabledGroups = $playlist->groups()->where('enabled', true)->get('name')->pluck('name');
         $this->enabledCategories = $playlist->categories()->where('enabled', true)->get('name')->pluck('name');
@@ -128,6 +145,48 @@ class ProcessM3uImport implements ShouldQueue
      */
     public function handle(): void
     {
+        // Network playlists don't have M3U files - they get content from assigned networks
+        if ($this->playlist->is_network_playlist) {
+            Log::info('ProcessM3uImport: Network playlist, skipping M3U import', [
+                'playlist_id' => $this->playlist->id,
+                'name' => $this->playlist->name,
+            ]);
+            $this->playlist->update(['status' => Status::Completed]);
+
+            return;
+        }
+
+        // Check if this is a media server playlist - these should not be processed via M3U import
+        // Media server playlists should be synced via SyncMediaServer job instead
+        if (in_array($this->playlist->source_type, [PlaylistSourceType::Emby, PlaylistSourceType::Jellyfin])) {
+            $integration = MediaServerIntegration::where('playlist_id', $this->playlist->id)->first();
+            if ($integration) {
+                // Dispatch the correct job for media server playlists
+                Log::info('ProcessM3uImport: Redirecting media server playlist to SyncMediaServer', [
+                    'playlist_id' => $this->playlist->id,
+                    'integration_id' => $integration->id,
+                ]);
+                dispatch(new SyncMediaServer($integration->id));
+
+                return;
+            }
+
+            // No integration found - log warning and abort to prevent data loss
+            Log::warning('ProcessM3uImport: Media server playlist has no integration, skipping to prevent data loss', [
+                'playlist_id' => $this->playlist->id,
+                'source_type' => $this->playlist->source_type?->value,
+            ]);
+
+            Notification::make()
+                ->warning()
+                ->title('Playlist sync skipped')
+                ->body("Playlist \"{$this->playlist->name}\" is a media server playlist but no integration was found. Please sync from the Media Server Integrations page.")
+                ->broadcast($this->playlist->user)
+                ->sendToDatabase($this->playlist->user);
+
+            return;
+        }
+
         if (! $this->force) {
             // Don't update if currently processing
             if ($this->playlist->isProcessing()) {
@@ -393,6 +452,8 @@ class ProcessM3uImport implements ShouldQueue
                 'rating' => null, // new field for rating
                 'rating_5based' => null, // new field for 5-based rating
                 'source_id' => null, // source ID for the channel
+                'can_merge' => $this->canMergeEnabled,
+                'epg_map_enabled' => $this->epgMapEnabled,
             ];
 
             // Keep track of channel number
@@ -430,7 +491,7 @@ class ProcessM3uImport implements ShouldQueue
                         $localChannelNo++;
 
                         // Get the category
-                        $category = $liveCategories->firstWhere('category_id', $item->category_id);
+                        $category = $liveCategories->firstWhere('category_id', $item->category_id ?? null);
 
                         // Determine if the channel should be included
                         if ($this->preprocess && ! $this->shouldIncludeChannel($category['category_name'] ?? '')) {
@@ -484,7 +545,7 @@ class ProcessM3uImport implements ShouldQueue
                         $localChannelNo++;
 
                         // Get the category
-                        $category = $vodCategories->firstWhere('category_id', $item->category_id);
+                        $category = $vodCategories->firstWhere('category_id', $item->category_id ?? null);
 
                         // Determine if the channel should be included
                         if ($this->preprocess && ! $this->shouldIncludeVod($category['category_name'] ?? '')) {
@@ -663,6 +724,8 @@ class ProcessM3uImport implements ShouldQueue
                     'shift' => 0,
                     'tvg_shift' => null,
                     'source_id' => null, // source ID for the channel
+                    'can_merge' => $this->canMergeEnabled,
+                    'epg_map_enabled' => $this->epgMapEnabled,
                 ];
                 if ($autoSort) {
                     $channelFields['sort'] = 0;
@@ -1213,6 +1276,10 @@ class ProcessM3uImport implements ShouldQueue
         // Create the jobs array
         $jobs = [];
 
+        // Flag any previously marked new items as not new
+        $playlist->groups()->where('new', true)->update(['new' => false]);
+        $playlist->channels()->where('new', true)->update(['new' => false]);
+
         // Check if we need to create a backup first (don't include first time syncs)
         if (! $this->isNew && $playlist->backup_before_sync) {
             $jobs[] = new CreateBackup(includeFiles: false);
@@ -1266,7 +1333,8 @@ class ProcessM3uImport implements ShouldQueue
             $seriesCategories->each(function ($category, $index) use (&$jobs, $playlistId, $batchNo, $categoryCount) {
                 if (! $this->preprocess || $this->shouldIncludeSeries($category['category_name'] ?? '')) {
                     // Check if category is auto-enabled
-                    $autoEnable = $this->enabledCategories->contains($category['category_name'] ?? '');
+                    $autoEnable = (bool) ($this->playlist->enable_series
+                        || $this->enabledCategories->contains($category['category_name'] ?? ''));
 
                     // Create a job for each series category
                     $jobs[] = new ProcessM3uImportSeriesChunk(
@@ -1297,19 +1365,22 @@ class ProcessM3uImport implements ShouldQueue
             ->catch(function (Throwable $e) use ($playlist) {
                 $error = "Error processing \"{$playlist->name}\": {$e->getMessage()}";
                 Log::error($error);
+
                 Notification::make()
                     ->danger()
                     ->title("Error processing \"{$playlist->name}\"")
                     ->body('Please view your notifications for details.')
                     ->broadcast($playlist->user);
+
                 Notification::make()
                     ->danger()
                     ->title("Error processing \"{$playlist->name}\"")
                     ->body($error)
                     ->sendToDatabase($playlist->user);
+
                 $playlist->update([
                     'status' => Status::Failed,
-                    'channels' => 0, // not using...
+                    'channels' => 0,
                     'synced' => now(),
                     'errors' => $error,
                     'progress' => 100,
@@ -1317,8 +1388,23 @@ class ProcessM3uImport implements ShouldQueue
                         ...$playlist->processing ?? [],
                         'live_processing' => false,
                         'vod_processing' => false,
+                        'series_processing' => false,
                     ],
                 ]);
+
+                // Auto retry on HTTP 503
+                if (self::isHttp503($e)) {
+                    $playlist->update([
+                        'processing' => [
+                            ...$playlist->processing ?? [],
+                            'live_processing' => false,
+                            'vod_processing' => false,
+                            'series_processing' => false,
+                        ],
+                    ]);
+                    self::scheduleRetry503($playlist);
+                }
+
                 event(new SyncCompleted($playlist));
             })->dispatch();
     }
@@ -1511,19 +1597,22 @@ class ProcessM3uImport implements ShouldQueue
             ->catch(function (Throwable $e) use ($playlist) {
                 $error = "Error processing \"{$playlist->name}\": {$e->getMessage()}";
                 Log::error($error);
+
                 Notification::make()
                     ->danger()
                     ->title("Error processing \"{$playlist->name}\"")
                     ->body('Please view your notifications for details.')
                     ->broadcast($playlist->user);
+
                 Notification::make()
                     ->danger()
                     ->title("Error processing \"{$playlist->name}\"")
                     ->body($error)
                     ->sendToDatabase($playlist->user);
+
                 $playlist->update([
                     'status' => Status::Failed,
-                    'channels' => 0, // not using...
+                    'channels' => 0,
                     'synced' => now(),
                     'errors' => $error,
                     'progress' => 100,
@@ -1531,8 +1620,23 @@ class ProcessM3uImport implements ShouldQueue
                         ...$playlist->processing ?? [],
                         'live_processing' => false,
                         'vod_processing' => false,
+                        'series_processing' => false,
                     ],
                 ]);
+
+                // Auto retry on HTTP 503
+                if (self::isHttp503($e)) {
+                    $playlist->update([
+                        'processing' => [
+                            ...$playlist->processing ?? [],
+                            'live_processing' => false,
+                            'vod_processing' => false,
+                            'series_processing' => false,
+                        ],
+                    ]);
+                    self::scheduleRetry503($playlist);
+                }
+
                 event(new SyncCompleted($playlist));
             })->dispatch();
     }
@@ -1649,5 +1753,52 @@ class ProcessM3uImport implements ShouldQueue
         }
 
         return false;
+    }
+
+    private static function isHttp503(Throwable $e): bool
+    {
+        if ($e instanceof RequestException) {
+            $response = $e->response;
+            if ($response) {
+                return $response->status() === 503;
+            }
+        }
+
+        return Str::contains($e->getMessage(), [
+            'status code 503',
+            'HTTP request returned status code 503',
+            '503 Service Temporarily Unavailable',
+            ' 503:',
+        ]);
+    }
+
+    private static function scheduleRetry503(Playlist $playlist): void
+    {
+        if (! (bool) config('dev.auto_retry_503_enabled', true)) {
+            return;
+        }
+
+        $max = (int) config('dev.auto_retry_503_max', 3);
+        $cooldown = (int) config('dev.auto_retry_503_cooldown_minutes', 10);
+
+        if (($playlist->auto_retry_503_count ?? 0) >= $max) {
+            return;
+        }
+
+        if ($playlist->auto_retry_503_last_at && $playlist->auto_retry_503_last_at->diffInMinutes(now()) < $cooldown) {
+            return;
+        }
+
+        $playlist->update([
+            'auto_retry_503_count' => ($playlist->auto_retry_503_count ?? 0) + 1,
+            'auto_retry_503_last_at' => now(),
+        ]);
+
+        $min = (int) config('dev.auto_retry_503_delay_min_seconds', 300);
+        $max = (int) config('dev.auto_retry_503_delay_max_seconds', 900);
+        $delay = random_int($min, $max);
+
+        dispatch(new self($playlist))
+            ->delay(now()->addSeconds($delay));
     }
 }

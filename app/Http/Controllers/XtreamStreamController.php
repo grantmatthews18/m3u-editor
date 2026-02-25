@@ -6,6 +6,7 @@ use App\Models\Channel;
 use App\Models\CustomPlaylist;
 use App\Models\Episode;
 use App\Models\MergedPlaylist;
+use App\Models\Network;
 use App\Models\Playlist;
 use App\Models\PlaylistAlias;
 use App\Models\PlaylistAuth;
@@ -152,6 +153,11 @@ class XtreamStreamController extends Controller
      */
     public function handleDirect(Request $request, string $username, string $password, string|int $streamId, ?string $format = null)
     {
+        // Validate that streamId is numeric to prevent database errors
+        if (! is_numeric($streamId)) {
+            return response()->json(['error' => 'Invalid stream ID'], 400);
+        }
+
         // If no live or VOD stream type specified, determine stream type by model
         $model = Channel::find($streamId);
         if ($model instanceof Channel) {
@@ -198,12 +204,25 @@ class XtreamStreamController extends Controller
      */
     public function handleLive(Request $request, string $username, string $password, string|int $streamId, ?string $format = null)
     {
+        // Validate that streamId is numeric to prevent database errors
+        if (! is_numeric($streamId)) {
+            return response()->json(['error' => 'Invalid stream ID'], 400);
+        }
+
         $format = $format ?? 'ts'; // Default to 'ts' if no format provided
         [$playlist, $channel] = $this->findAuthenticatedPlaylistAndStreamModel($username, $password, $streamId, 'live');
+
+        // Handle network playlists - stream_id is actually a network ID
+        if ($playlist instanceof Playlist && $playlist->is_network_playlist) {
+            return $this->handleNetworkStream($playlist, $streamId);
+        }
 
         if ($channel instanceof Channel) {
             if ($playlist->enable_proxy) {
                 // Timeshift handled in proxy controller (if needed)
+                // Add username to request for proxy traceability
+                $request->merge(['username' => $username]);
+
                 return app()->call('App\\Http\\Controllers\\Api\\M3uProxyApiController@channel', [
                     'id' => $streamId,
                     'uuid' => $playlist->uuid,
@@ -236,10 +255,18 @@ class XtreamStreamController extends Controller
      */
     public function handleVod(Request $request, string $username, string $password, string $streamId, ?string $format = null)
     {
+        // Validate that streamId is numeric to prevent database errors
+        if (! is_numeric($streamId)) {
+            return response()->json(['error' => 'Invalid stream ID'], 400);
+        }
+
         $format = $format ?? 'ts'; // Default to 'ts' if no format provided
         [$playlist, $channel] = $this->findAuthenticatedPlaylistAndStreamModel($username, $password, $streamId, 'vod');
         if ($channel instanceof Channel) {
             if ($playlist->enable_proxy) {
+                // Add username to request for proxy traceability
+                $request->merge(['username' => $username]);
+
                 return app()->call('App\\Http\\Controllers\\Api\\M3uProxyApiController@channel', [
                     'id' => $streamId,
                     'uuid' => $playlist->uuid,
@@ -257,10 +284,18 @@ class XtreamStreamController extends Controller
      */
     public function handleSeries(Request $request, string $username, string $password, string|int $streamId, ?string $format = null)
     {
+        // Validate that streamId is numeric to prevent database errors
+        if (! is_numeric($streamId)) {
+            return response()->json(['error' => 'Invalid stream ID'], 400);
+        }
+
         $format = $format ?? 'mp4'; // Default to 'mp4' if no format provided
         [$playlist, $episode] = $this->findAuthenticatedPlaylistAndStreamModel($username, $password, $streamId, 'episode');
         if ($episode instanceof Episode) {
             if ($playlist->enable_proxy) {
+                // Add username to request for proxy traceability
+                $request->merge(['username' => $username]);
+
                 return app()->call('App\\Http\\Controllers\\Api\\M3uProxyApiController@episode', [
                     'id' => $streamId,
                     'uuid' => $playlist->uuid,
@@ -302,6 +337,11 @@ class XtreamStreamController extends Controller
      */
     public function handleTimeshift(Request $request, string $username, string $password, int $duration, string $date, string|int $streamId, ?string $format = null)
     {
+        // Validate that streamId is numeric to prevent database errors
+        if (! is_numeric($streamId)) {
+            return response()->json(['error' => 'Invalid stream ID'], 400);
+        }
+
         $format = $format ?? 'ts'; // Default to 'ts' if no format provided
 
         // Timeshift is only available for live channels
@@ -313,9 +353,11 @@ class XtreamStreamController extends Controller
 
         // Parse the date parameter and add timeshift parameters to the request
         // Date format from Xtream API: YYYY-MM-DD:HH-MM-SS
+        // Also add username for proxy traceability
         $request->merge([
             'timeshift_duration' => $duration,
             'timeshift_date' => $date,
+            'username' => $username,
         ]);
 
         if ($playlist->enable_proxy) {
@@ -329,5 +371,29 @@ class XtreamStreamController extends Controller
 
             return Redirect::to($streamUrl);
         }
+    }
+
+    /**
+     * Handle network stream requests.
+     * Redirects to the network's HLS playlist.
+     */
+    private function handleNetworkStream(Playlist $playlist, string|int $networkId)
+    {
+        $network = $playlist->networks()
+            ->where('id', $networkId)
+            ->where('enabled', true)
+            ->first();
+
+        if (! $network) {
+            return response()->json(['error' => 'Network not found or not enabled'], 404);
+        }
+
+        // Check if network is broadcasting
+        if (! $network->broadcast_enabled) {
+            return response()->json(['error' => 'Network broadcast not enabled'], 503);
+        }
+
+        // Redirect to the network's HLS playlist
+        return Redirect::to($network->stream_url);
     }
 }

@@ -96,6 +96,8 @@ class AdminPanelProvider extends PanelProvider
             ->navigationGroups([
                 NavigationGroup::make('Playlist')
                     ->icon('heroicon-m-play-pause'),
+                NavigationGroup::make('Integrations')
+                    ->icon('heroicon-m-server-stack'),
                 NavigationGroup::make('Live Channels')
                     ->icon('heroicon-m-tv'),
                 NavigationGroup::make('VOD Channels')

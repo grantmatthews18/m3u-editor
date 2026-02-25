@@ -3,8 +3,11 @@
 namespace App\Filament\Resources\Playlists;
 
 use App\Enums\ChannelMatchStrategy;
+use App\Enums\PlaylistSourceType;
 use App\Enums\Status;
 use App\Facades\PlaylistFacade;
+use App\Filament\Actions\ModalActionGroup;
+use App\Filament\Resources\MediaServerIntegrations\MediaServerIntegrationResource;
 use App\Filament\Resources\Playlists\Pages\CreatePlaylist;
 use App\Filament\Resources\Playlists\Pages\EditPlaylist;
 use App\Filament\Resources\Playlists\Pages\ListPlaylists;
@@ -16,14 +19,18 @@ use App\Jobs\DuplicatePlaylist;
 use App\Jobs\ProcessM3uImport;
 use App\Jobs\ProcessM3uImportSeries;
 use App\Jobs\ProcessVodChannels;
+use App\Jobs\SyncMediaServer;
 use App\Livewire\EpgViewer;
 use App\Livewire\MediaFlowProxyUrl;
 use App\Livewire\PlaylistEpgUrl;
 use App\Livewire\PlaylistInfo;
 use App\Livewire\PlaylistM3uUrl;
 use App\Livewire\XtreamApiInfo;
+use App\Models\Group;
+use App\Models\MediaServerIntegration;
 use App\Models\Playlist;
 use App\Models\PlaylistAuth;
+use App\Models\PlaylistProfile;
 use App\Models\SourceCategory;
 use App\Models\SourceGroup;
 use App\Models\StreamProfile;
@@ -31,6 +38,7 @@ use App\Rules\CheckIfUrlOrLocalPath;
 use App\Rules\Cron;
 use App\Services\EpgCacheService;
 use App\Services\M3uProxyService;
+use App\Services\ProfileService;
 use App\Traits\HasUserFiltering;
 use Carbon\Carbon;
 use Cron\CronExpression;
@@ -47,6 +55,7 @@ use Filament\Forms\Components\CheckboxList;
 use Filament\Forms\Components\DateTimePicker;
 use Filament\Forms\Components\FileUpload;
 use Filament\Forms\Components\ModalTableSelect;
+use Filament\Forms\Components\Placeholder;
 use Filament\Forms\Components\Repeater;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TagsInput;
@@ -75,6 +84,8 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\HtmlString;
 use Illuminate\Validation\Rule;
 use RyanChandler\FilamentProgressColumn\ProgressColumn;
 
@@ -119,9 +130,15 @@ class PlaylistResource extends Resource
         return $table->persistFiltersInSession()
             ->persistSortInSession()
             ->modifyQueryUsing(function (Builder $query) {
-                $query->withCount('enabled_live_channels')
-                    ->withCount('enabled_vod_channels')
-                    ->withCount('enabled_series');
+                $query->withCount([
+                    'enabled_live_channels',
+                    'enabled_vod_channels',
+                    'enabled_series',
+                    'groups',
+                    'live_channels',
+                    'vod_channels',
+                    'series',
+                ]);
             })
             ->deferLoading()
             ->columns([
@@ -131,6 +148,43 @@ class PlaylistResource extends Resource
                     ->sortable(),
                 TextColumn::make('name')
                     ->searchable()
+                    ->description(function ($record) {
+                        if ($record->is_network_playlist) {
+                            return new HtmlString('
+                            <div class="flex items-center gap-1">
+                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="size-4">
+                                    <path d="M16.364 3.636a.75.75 0 0 0-1.06 1.06 7.5 7.5 0 0 1 0 10.607.75.75 0 0 0 1.06 1.061 9 9 0 0 0 0-12.728ZM4.697 4.697a.75.75 0 0 0-1.061-1.061 9 9 0 0 0 0 12.728.75.75 0 1 0 1.06-1.06 7.5 7.5 0 0 1 0-10.607Z" />
+                                    <path d="M12.475 6.464a.75.75 0 0 1 1.06 0 5 5 0 0 1 0 7.072.75.75 0 0 1-1.06-1.061 3.5 3.5 0 0 0 0-4.95.75.75 0 0 1 0-1.06ZM7.525 6.464a.75.75 0 0 1 0 1.061 3.5 3.5 0 0 0 0 4.95.75.75 0 0 1-1.06 1.06 5 5 0 0 1 0-7.07.75.75 0 0 1 1.06 0ZM11 10a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z" />
+                                </svg>
+                                Network Playlist
+                            </div>');
+                        }
+                        if ($record->source_type === PlaylistSourceType::LocalMedia) {
+                            $integration = MediaServerIntegration::where('playlist_id', $record->id)->first();
+                            $integrationLink = MediaServerIntegrationResource::getUrl('edit', ['record' => $integration]);
+
+                            return new HtmlString('
+                            <div class="flex items-center gap-1">
+                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" class="size-4">
+                                    <path d="M3 3.5A1.5 1.5 0 0 1 4.5 2h1.879a1.5 1.5 0 0 1 1.06.44l1.122 1.12A1.5 1.5 0 0 0 9.62 4H11.5A1.5 1.5 0 0 1 13 5.5v1H3v-3ZM3.081 8a1.5 1.5 0 0 0-1.423 1.974l1 3A1.5 1.5 0 0 0 4.081 14h7.838a1.5 1.5 0 0 0 1.423-1.026l1-3A1.5 1.5 0 0 0 12.919 8H3.081Z" />
+                                </svg>
+                                <a class="inline m-0 p-0 hover:underline" href="'.$integrationLink.'">Local Media: '.$integration->name.'</a>
+                            </div>');
+                        }
+                        if (in_array($record->source_type, [PlaylistSourceType::Emby, PlaylistSourceType::Jellyfin])) {
+                            $integration = MediaServerIntegration::where('playlist_id', $record->id)->first();
+                            $integrationLink = MediaServerIntegrationResource::getUrl('edit', ['record' => $integration]);
+
+                            return new HtmlString('
+                            <div class="flex items-center gap-1">
+                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="size-4">
+                                    <path d="M4.464 3.162A2 2 0 0 1 6.28 2h7.44a2 2 0 0 1 1.816 1.162l1.154 2.5c.067.145.115.291.145.438A3.508 3.508 0 0 0 16 6H4c-.288 0-.568.035-.835.1.03-.147.078-.293.145-.438l1.154-2.5Z" />
+                                    <path fill-rule="evenodd" d="M2 9.5a2 2 0 0 1 2-2h12a2 2 0 1 1 0 4H4a2 2 0 0 1-2-2Zm13.24 0a.75.75 0 0 1 .75-.75H16a.75.75 0 0 1 .75.75v.01a.75.75 0 0 1-.75.75h-.01a.75.75 0 0 1-.75-.75V9.5Zm-2.25-.75a.75.75 0 0 0-.75.75v.01c0 .414.336.75.75.75H13a.75.75 0 0 0 .75-.75V9.5a.75.75 0 0 0-.75-.75h-.01ZM2 15a2 2 0 0 1 2-2h12a2 2 0 1 1 0 4H4a2 2 0 0 1-2-2Zm13.24 0a.75.75 0 0 1 .75-.75H16a.75.75 0 0 1 .75.75v.01a.75.75 0 0 1-.75.75h-.01a.75.75 0 0 1-.75-.75V15Zm-2.25-.75a.75.75 0 0 0-.75.75v.01c0 .414.336.75.75.75H13a.75.75 0 0 0 .75-.75V15a.75.75 0 0 0-.75-.75h-.01Z" clip-rule="evenodd" />
+                                </svg>
+                                <a class="inline m-0 p-0 hover:underline" href="'.$integrationLink.'">Integration: '.$integration->name.'</a>
+                            </div>');
+                        }
+                    })
                     ->sortable(),
                 TextColumn::make('url')
                     ->label('Playlist URL')
@@ -142,6 +196,13 @@ class PlaylistResource extends Resource
                     ->getStateUsing(function ($record) {
                         if ($record->xtream) {
                             try {
+                                // If profiles are enabled, show total capacity from all profiles
+                                if ($record->profiles_enabled) {
+                                    $poolStatus = ProfileService::getPoolStatus($record);
+
+                                    return $poolStatus['total_capacity'] > 0 ? $poolStatus['total_capacity'] : 'N/A';
+                                }
+                                // Otherwise show primary account max connections
                                 if ($record->xtream_status['user_info'] ?? false) {
                                     return $record->xtream_status['user_info']['max_connections'];
                                 }
@@ -151,14 +212,37 @@ class PlaylistResource extends Resource
 
                         return 'N/A';
                     })
-                    ->description(fn (Playlist $record): string => $record->xtream ? 'Active: '.($record->xtream_status['user_info']['active_cons'] ?? 0) : '')
+                    ->description(function (Playlist $record): string {
+                        if (! $record->xtream) {
+                            return '';
+                        }
+                        // If profiles are enabled, show combined active count
+                        if ($record->profiles_enabled) {
+                            $poolStatus = ProfileService::getPoolStatus($record);
+                            $profileCount = count($poolStatus['profiles']);
+
+                            return "Active: {$poolStatus['total_active']} ({$profileCount} profiles)";
+                        }
+
+                        // Otherwise show primary account active
+                        return 'Active: '.($record->xtream_status['user_info']['active_cons'] ?? 0);
+                    })
                     ->toggleable(isToggledHiddenByDefault: true),
                 TextColumn::make('available_streams')
                     ->label('Proxy Streams')
                     ->toggleable()
                     ->formatStateUsing(fn (int $state): string => $state === 0 ? '∞' : (string) $state)
                     ->tooltip('Total streams available for this playlist (∞ indicates no limit)')
-                    ->description(fn (Playlist $record): string => 'Active: '.M3uProxyService::getPlaylistActiveStreamsCount($record))
+                    ->description(function (Playlist $record): string {
+                        // Cache active streams count for 5 seconds to reduce load
+                        $count = Cache::remember(
+                            "active_streams_{$record->id}",
+                            5,
+                            fn () => M3uProxyService::getPlaylistActiveStreamsCount($record)
+                        );
+
+                        return "Active: {$count}";
+                    })
                     ->sortable(),
                 TextColumn::make('groups_count')
                     ->label('Groups')
@@ -173,8 +257,8 @@ class PlaylistResource extends Resource
                 //     ->sortable(),
                 TextColumn::make('live_channels_count')
                     ->label('Live')
-                    ->counts('live_channels')
-                    ->description(fn (Playlist $record): string => "Enabled: {$record->enabled_live_channels_count}")
+                    ->formatStateUsing(fn (Playlist $record): int => $record->is_network_playlist ? $record->networks()->count() : $record->live_channels_count)
+                    ->description(fn (Playlist $record): string => $record->is_network_playlist ? 'Enabled: '.($record->networks()->get()->filter(fn ($n) => $n->isBroadcasting())->count()) : "Enabled: {$record->enabled_live_channels_count}")
                     ->toggleable()
                     ->sortable(),
                 TextColumn::make('vod_channels_count')
@@ -212,7 +296,11 @@ class PlaylistResource extends Resource
                 ToggleColumn::make('enable_proxy')
                     ->label('Proxy')
                     ->toggleable()
-                    ->tooltip('Toggle proxy status')
+                    ->tooltip(fn (Playlist $record): string => $record->profiles_enabled
+                        ? 'Proxy is required when Provider Profiles are enabled'
+                        : 'Toggle proxy status')
+                    ->disabled(fn (Playlist $record): bool => $record->profiles_enabled)
+                    ->hidden(fn () => ! auth()->user()->canUseProxy())
                     ->sortable(),
                 ToggleColumn::make('auto_sync')
                     ->label('Auto Sync')
@@ -270,303 +358,338 @@ class PlaylistResource extends Resource
                 //
             ])
             ->recordActions([
-                ActionGroup::make([
-                    Action::make('process')
-                        ->label('Sync and Process')
-                        ->icon('heroicon-o-arrow-path')
-                        ->action(function ($record) {
-                            $record->update([
-                                'status' => Status::Processing,
-                                'progress' => 0,
-                                'vod_progress' => 0,
-                            ]);
-                            app('Illuminate\Contracts\Bus\Dispatcher')
-                                ->dispatch(new ProcessM3uImport($record, force: true));
-                        })->after(function () {
-                            Notification::make()
-                                ->success()
-                                ->title('Playlist is processing')
-                                ->body('Playlist is being processed in the background. Depending on the size of your playlist, this may take a while. You will be notified on completion.')
-                                ->duration(10000)
-                                ->send();
-                        })
-                        ->disabled(fn ($record): bool => $record->isProcessing())
-                        ->requiresConfirmation()
-                        ->icon('heroicon-o-arrow-path')
-                        ->modalIcon('heroicon-o-arrow-path')
-                        ->modalDescription('Process playlist now?')
-                        ->modalSubmitActionLabel('Yes, process now'),
-                    Action::make('reset_processing')
-                        ->label('Reset Processing State')
-                        ->icon('heroicon-o-arrow-path')
-                        ->color('warning')
-                        ->requiresConfirmation()
-                        ->modalHeading('Reset Processing State')
-                        ->modalDescription('This will clear any stuck processing locks and allow new syncs to run. Use this if syncs appear stuck.')
-                        ->modalSubmitActionLabel('Reset')
-                        ->action(function (Playlist $record) {
-                            // Clear processing flag
-                            $record->update([
-                                'processing' => [
-                                    'live_processing' => false,
-                                    'vod_processing' => false,
-                                    'series_processing' => false,
-                                ],
-                            ]);
+                ModalActionGroup::make('Playlist Actions')
+                    ->modalHeading(fn ($record) => 'Actions for '.$record->name)
+                    ->gridColumns(3)
+                    ->schema([
+                        Action::make('process')
+                            ->label('Sync and Process')
+                            ->icon('heroicon-o-arrow-path')
+                            ->action(function ($record) {
+                                // For media server playlists, dispatch the media server sync job
+                                if (in_array($record->source_type, [PlaylistSourceType::Emby, PlaylistSourceType::Jellyfin, PlaylistSourceType::Plex])) {
+                                    $integration = MediaServerIntegration::where('playlist_id', $record->id)->first();
+                                    if ($integration) {
+                                        app('Illuminate\Contracts\Bus\Dispatcher')
+                                            ->dispatch(new SyncMediaServer($integration->id));
 
-                            Notification::make()
-                                ->success()
-                                ->title('Processing state reset')
-                                ->body('The playlist is no longer processing. You can now run new syncs.')
-                                ->send();
-                        })
-                        ->visible(fn (Playlist $record) => $record->isProcessing()),
-                    Action::make('process_series')
-                        ->label('Fetch Series Metadata')
-                        ->icon('heroicon-o-arrow-down-tray')
-                        ->action(function ($record) {
-                            $record->update([
-                                'status' => Status::Processing,
-                                'series_progress' => 0,
-                            ]);
-                            app('Illuminate\Contracts\Bus\Dispatcher')
-                                ->dispatch(new ProcessM3uImportSeries($record, force: true));
-                        })->after(function () {
-                            Notification::make()
-                                ->success()
-                                ->title('Playlist is fetching metadata for Series')
-                                ->body('Playlist Series are being processed in the background. Depending on the number of enabled Series, this may take a while. You will be notified on completion.')
-                                ->duration(10000)
-                                ->send();
-                        })
-                        ->disabled(fn ($record): bool => $record->isProcessing())
-                        ->hidden(fn ($record): bool => ! $record->xtream)
-                        ->requiresConfirmation()
-                        ->icon('heroicon-o-arrow-down-tray')
-                        ->modalIcon('heroicon-o-arrow-down-tray')
-                        ->modalDescription('Fetch Series metadata for this playlist now? Only enabled Series will be included.')
-                        ->modalSubmitActionLabel('Yes, process now'),
-                    Action::make('process_vod')
-                        ->label('Fetch VOD Metadata')
-                        ->icon('heroicon-o-arrow-down-tray')
-                        ->action(function ($record) {
-                            $record->update([
-                                'status' => Status::Processing,
-                                'progress' => 0,
-                            ]);
-                            app('Illuminate\Contracts\Bus\Dispatcher')
-                                ->dispatch(new ProcessVodChannels(playlist: $record));
-                        })->after(function () {
-                            Notification::make()
-                                ->success()
-                                ->title('Playlist is fetching metadata for VOD channels')
-                                ->body('Playlist VOD channels are being processed in the background. Depending on the number of enabled VOD channels, this may take a while. You will be notified on completion.')
-                                ->duration(10000)
-                                ->send();
-                        })
-                        ->disabled(fn ($record): bool => $record->isProcessing())
-                        ->hidden(fn ($record): bool => ! $record->xtream)
-                        ->requiresConfirmation()
-                        ->icon('heroicon-o-arrow-down-tray')
-                        ->modalIcon('heroicon-o-arrow-down-tray')
-                        ->modalDescription('Fetch VOD metadata for this playlist now? Only enabled VOD channels will be included.')
-                        ->modalSubmitActionLabel('Yes, process now'),
-                    Action::make('Download M3U')
-                        ->label('Download M3U')
-                        ->icon('heroicon-o-arrow-down-tray')
-                        ->url(fn ($record) => PlaylistFacade::getUrls($record)['m3u'])
-                        ->openUrlInNewTab(),
-                    EpgCacheService::getEpgTableAction(),
-                    Action::make('HDHomeRun URL')
-                        ->label('HDHomeRun URL')
-                        ->icon('heroicon-o-arrow-top-right-on-square')
-                        ->url(fn ($record) => PlaylistFacade::getUrls($record)['hdhr'])
-                        ->openUrlInNewTab(),
-                    Action::make('Public URL')
-                        ->label('Public URL')
-                        ->icon('heroicon-o-arrow-top-right-on-square')
-                        ->url(fn ($record) => '/playlist/v/'.$record->uuid)
-                        ->openUrlInNewTab(),
-                    Action::make('Duplicate')
-                        ->label('Duplicate')
-                        ->schema([
-                            TextInput::make('name')
-                                ->label('Playlist name')
-                                ->required()
-                                ->helperText('This will be the name of the duplicated playlist.'),
-                        ])
-                        ->action(function ($record, $data) {
-                            app('Illuminate\Contracts\Bus\Dispatcher')
-                                ->dispatch(new DuplicatePlaylist($record, $data['name']));
-                        })->after(function () {
-                            Notification::make()
-                                ->success()
-                                ->title('Playlist is being duplicated')
-                                ->body('Playlist is being duplicated in the background. You will be notified on completion.')
-                                ->duration(3000)
-                                ->send();
-                        })
-                        ->requiresConfirmation()
-                        ->icon('heroicon-o-document-duplicate')
-                        ->modalIcon('heroicon-o-document-duplicate')
-                        ->modalDescription('Duplicate playlist now?')
-                        ->modalSubmitActionLabel('Yes, duplicate now'),
+                                        return;
+                                    }
+                                }
 
-                    Action::make('Copy Changes')
-                        ->label('Copy Changes')
-                        ->schema([
-                            Select::make('target_playlist_id')
-                                ->label('Target Playlist')
-                                ->options(function ($record) {
-                                    return Playlist::where('id', '!=', $record->id)
-                                        ->where('user_id', auth()->id())
-                                        ->orderBy('name')
-                                        ->pluck('name', 'id')
-                                        ->toArray();
-                                })
-                                ->searchable()
-                                ->required(),
-                            Select::make('channel_match_attributes')
-                                ->label('Channel Match Attributes')
-                                ->options([
-                                    'name' => 'Name',
-                                    'title' => 'Title',
-                                    'url' => 'URL',
-                                    'stream_id' => 'TVG-ID/Stream ID',
-                                    'station_id' => 'Station ID (tvc-guide-stationid)',
-                                    'logo_internal' => 'Logo (tvg-logo)',
-                                    'channel' => 'Channel Number (tvg-chno/num)',
-                                ])
-                                ->hintIcon(
-                                    'heroicon-s-information-circle',
-                                    tooltip: 'Select the channel attributes to match channels between the source and target playlists. Channels will be matched based on these attributes. If multiple attributes are selected, all must match for a channel to be considered the same.',
-                                )
-                                ->multiple()
-                                ->required()
-                                ->default(['url'])
-                                ->columnSpanFull(),
-                            Toggle::make('create_missing_channels')
-                                ->label('Create Missing Channels')
-                                ->live()
-                                ->hintIcon(
-                                    'heroicon-s-information-circle',
-                                    tooltip: 'If enabled, missing channels will be created in the target playlist. If disabled, only existing matched channels will be updated.',
-                                )
-                                ->default(false),
-                            Toggle::make('all_attributes')
-                                ->label('All Attributes')
-                                ->live()
-                                ->hintIcon(
-                                    'heroicon-s-information-circle',
-                                    tooltip: 'If enabled, all channel attributes will be copied to the target playlist. If disabled, only the selected attributes below will be copied.',
-                                )
-                                ->default(true),
-                            Select::make('channel_attributes')
-                                ->label('Channel Attributes to Copy')
-                                ->options([
-                                    'enabled' => 'Enabled Status',
-                                    'name' => 'Name',
-                                    'title' => 'Title',
-                                    'logo_internal' => 'Logo (tvg-logo)',
-                                    'stream_id' => 'TVG-ID/Stream ID',
-                                    'station_id' => 'Station ID (tvc-guide-stationid)',
-                                    'group' => 'Group (group-title)',
-                                    'shift' => 'Shift (tvg-shift)',
-                                    'channel' => 'Channel Number (tvg-chno/num)',
-                                    'sort' => 'Sort Order',
-                                ])
-                                ->multiple()
-                                ->required()
-                                ->helperText('Select the channel attributes you want to copy to the target playlist.')
-                                ->hidden(fn ($get) => (bool) $get('all_attributes')),
-                            Toggle::make('overwrite')
-                                ->label('Overwrite Existing Attributes')
-                                ->hintIcon(
-                                    'heroicon-s-information-circle',
-                                    tooltip: 'If enabled, existing custom attributes in the target playlist will be overwritten. If disabled, only empty custom attributes will be updated.',
-                                )
-                                ->default(true),
-                        ])
-                        ->action(function ($record, $data) {
-                            app('Illuminate\Contracts\Bus\Dispatcher')
-                                ->dispatch(new CopyAttributesToPlaylist(
-                                    source: $record,
-                                    targetId: $data['target_playlist_id'],
-                                    channelAttributes: $data['channel_attributes'] ?? [],
-                                    channelMatchAttributes: $data['channel_match_attributes'] ?? ['url'],
-                                    createIfMissing: $data['create_missing_channels'] ?? false,
-                                    allAttributes: $data['all_attributes'] ?? false,
-                                    overwrite: $data['overwrite'] ?? false,
-                                ));
-                        })->after(function () {
-                            Notification::make()
-                                ->success()
-                                ->title('Playlist settings are being copied')
-                                ->body('Playlist settings are being copied in the background. You will be notified on completion.')
-                                ->duration(3000)
-                                ->send();
-                        })
-                        ->requiresConfirmation()
-                        ->icon('heroicon-o-clipboard-document')
-                        ->modalIcon('heroicon-o-clipboard-document')
-                        ->modalDescription('Select the target playlist and channel attributes to copy')
-                        ->modalSubmitActionLabel('Copy now'),
+                                // For regular playlists, use the standard M3U import process
+                                $record->update([
+                                    'status' => Status::Processing,
+                                    'progress' => 0,
+                                    'vod_progress' => 0,
+                                ]);
+                                app('Illuminate\Contracts\Bus\Dispatcher')
+                                    ->dispatch(new ProcessM3uImport($record, force: true));
+                            })->after(function ($record) {
+                                $isMediaServer = in_array($record->source_type, [PlaylistSourceType::Emby, PlaylistSourceType::Jellyfin]);
+                                $message = $isMediaServer
+                                    ? 'Media server content is being synced in the background. Depending on the size of your library, this may take several minutes. You will be notified on completion.'
+                                    : 'Playlist is being processed in the background. Depending on the size of your playlist, this may take a while. You will be notified on completion.';
 
-                    Action::make('view_sync_logs')
-                        ->label('View Sync Logs')
-                        ->color('gray')
-                        ->icon('heroicon-m-arrows-right-left')
-                        ->url(function (Playlist $record): string {
-                            return "/playlists/{$record->id}/playlist-sync-statuses";
-                        })
-                        ->openUrlInNewTab(false),
-                    Action::make('reset')
-                        ->label('Reset status')
-                        ->icon('heroicon-o-arrow-uturn-left')
-                        ->color('warning')
-                        ->action(function ($record) {
-                            $record->update([
-                                'status' => Status::Pending,
-                                'processing' => [
-                                    'live_processing' => false,
-                                    'vod_processing' => false,
-                                    'series_processing' => false,
-                                ],
-                                'progress' => 0,
-                                'series_progress' => 0,
-                                'vod_progress' => 0,
-                                'channels' => 0,
-                                'synced' => null,
-                                'errors' => null,
-                            ]);
-                        })->after(function () {
-                            Notification::make()
-                                ->success()
-                                ->title('Playlist status reset')
-                                ->body('Playlist status has been reset.')
-                                ->duration(3000)
-                                ->send();
-                        })
-                        ->requiresConfirmation()
-                        ->icon('heroicon-o-arrow-uturn-left')
-                        ->modalIcon('heroicon-o-arrow-uturn-left')
-                        ->modalDescription('Reset playlist status so it can be processed again. Only perform this action if you are having problems with the playlist syncing.')
-                        ->modalSubmitActionLabel('Yes, reset now'),
-                    Action::make('purge_series')
-                        ->label('Purge Series')
-                        ->icon('heroicon-s-trash')
-                        ->color('danger')
-                        ->action(function ($record) {
-                            $record->series()->delete();
-                        })
-                        ->requiresConfirmation()
-                        ->icon('heroicon-s-trash')
-                        ->modalIcon('heroicon-s-trash')
-                        ->modalDescription('This action will permanently delete all series associated with the playlist. Proceed with caution.')
-                        ->modalSubmitActionLabel('Purge now')
-                        ->hidden(fn ($record): bool => ! $record->xtream),
-                    DeleteAction::make(),
-                ])->button()->hiddenLabel()->size('sm'),
+                                Notification::make()
+                                    ->success()
+                                    ->title($isMediaServer ? 'Media server sync started' : 'Playlist is processing')
+                                    ->body($message)
+                                    ->duration(10000)
+                                    ->send();
+                            })
+                            ->disabled(fn ($record): bool => $record->isProcessing())
+                            ->requiresConfirmation()
+                            ->icon('heroicon-o-arrow-path')
+                            ->modalIcon('heroicon-o-arrow-path')
+                            ->modalDescription(function ($record) {
+                                $isMediaServer = in_array($record->source_type, [PlaylistSourceType::Emby, PlaylistSourceType::Jellyfin]);
+
+                                return $isMediaServer
+                                    ? 'Sync content from the media server now? This will fetch all movies, series, and episodes from your media server library.'
+                                    : 'Process playlist now?';
+                            })
+                            ->modalSubmitActionLabel('Yes, sync now')
+                            ->hidden(fn ($record): bool => $record->is_network_playlist),
+                        Action::make('reset_processing')
+                            ->label('Reset Processing State')
+                            ->icon('heroicon-o-arrow-path')
+                            ->color('warning')
+                            ->requiresConfirmation()
+                            ->modalHeading('Reset Processing State')
+                            ->modalDescription('This will clear any stuck processing locks and allow new syncs to run. Use this if syncs appear stuck.')
+                            ->modalSubmitActionLabel('Reset')
+                            ->action(function (Playlist $record) {
+                                // Clear processing flag
+                                $record->update([
+                                    'processing' => [
+                                        'live_processing' => false,
+                                        'vod_processing' => false,
+                                        'series_processing' => false,
+                                    ],
+                                ]);
+
+                                Notification::make()
+                                    ->success()
+                                    ->title('Processing state reset')
+                                    ->body('The playlist is no longer processing. You can now run new syncs.')
+                                    ->send();
+                            })
+                            ->visible(fn (Playlist $record) => $record->isProcessing() && ! ($record->is_network_playlist || $record->source_type !== null)),
+                        Action::make('process_series')
+                            ->label('Fetch Series Metadata')
+                            ->icon('heroicon-o-arrow-down-tray')
+                            ->action(function ($record) {
+                                $record->update([
+                                    'status' => Status::Processing,
+                                    'series_progress' => 0,
+                                ]);
+                                app('Illuminate\Contracts\Bus\Dispatcher')
+                                    ->dispatch(new ProcessM3uImportSeries($record, force: true));
+                            })->after(function () {
+                                Notification::make()
+                                    ->success()
+                                    ->title('Playlist is fetching metadata for Series')
+                                    ->body('Playlist Series are being processed in the background. Depending on the number of enabled Series, this may take a while. You will be notified on completion.')
+                                    ->duration(10000)
+                                    ->send();
+                            })
+                            ->disabled(fn ($record): bool => $record->isProcessing())
+                            ->hidden(fn ($record): bool => ! $record->xtream || $record->is_network_playlist)
+                            ->requiresConfirmation()
+                            ->icon('heroicon-o-arrow-down-tray')
+                            ->modalIcon('heroicon-o-arrow-down-tray')
+                            ->modalDescription('Fetch Series metadata for this playlist now? Only enabled Series will be included.')
+                            ->modalSubmitActionLabel('Yes, process now'),
+                        Action::make('process_vod')
+                            ->label('Fetch VOD Metadata')
+                            ->icon('heroicon-o-arrow-down-tray')
+                            ->action(function ($record) {
+                                $record->update([
+                                    'status' => Status::Processing,
+                                    'progress' => 0,
+                                ]);
+                                app('Illuminate\Contracts\Bus\Dispatcher')
+                                    ->dispatch(new ProcessVodChannels(playlist: $record));
+                            })->after(function () {
+                                Notification::make()
+                                    ->success()
+                                    ->title('Playlist is fetching metadata for VOD channels')
+                                    ->body('Playlist VOD channels are being processed in the background. Depending on the number of enabled VOD channels, this may take a while. You will be notified on completion.')
+                                    ->duration(10000)
+                                    ->send();
+                            })
+                            ->disabled(fn ($record): bool => $record->isProcessing())
+                            ->hidden(fn ($record): bool => ! $record->xtream || $record->is_network_playlist)
+                            ->requiresConfirmation()
+                            ->icon('heroicon-o-arrow-down-tray')
+                            ->modalIcon('heroicon-o-arrow-down-tray')
+                            ->modalDescription('Fetch VOD metadata for this playlist now? Only enabled VOD channels will be included.')
+                            ->modalSubmitActionLabel('Yes, process now'),
+                        Action::make('Download M3U')
+                            ->label('Download M3U')
+                            ->icon('heroicon-o-arrow-down-tray')
+                            ->url(fn ($record) => PlaylistFacade::getUrls($record)['m3u'])
+                            ->openUrlInNewTab(),
+                        EpgCacheService::getEpgTableAction(),
+                        Action::make('HDHomeRun URL')
+                            ->label('HDHomeRun URL')
+                            ->icon('heroicon-o-arrow-top-right-on-square')
+                            ->url(fn ($record) => PlaylistFacade::getUrls($record)['hdhr'])
+                            ->openUrlInNewTab()
+                            ->hidden(fn ($record): bool => $record->is_network_playlist),
+                        Action::make('Public URL')
+                            ->label('Public URL')
+                            ->icon('heroicon-o-arrow-top-right-on-square')
+                            ->url(fn ($record) => '/playlist/v/'.$record->uuid)
+                            ->openUrlInNewTab(),
+                        Action::make('Duplicate')
+                            ->label('Duplicate')
+                            ->schema([
+                                TextInput::make('name')
+                                    ->label('Playlist name')
+                                    ->required()
+                                    ->helperText('This will be the name of the duplicated playlist.'),
+                            ])
+                            ->action(function ($record, $data) {
+                                app('Illuminate\Contracts\Bus\Dispatcher')
+                                    ->dispatch(new DuplicatePlaylist($record, $data['name']));
+                            })->after(function () {
+                                Notification::make()
+                                    ->success()
+                                    ->title('Playlist is being duplicated')
+                                    ->body('Playlist is being duplicated in the background. You will be notified on completion.')
+                                    ->duration(3000)
+                                    ->send();
+                            })
+                            ->hidden(fn ($record): bool => $record->source_type !== null)
+                            ->requiresConfirmation()
+                            ->icon('heroicon-o-document-duplicate')
+                            ->modalIcon('heroicon-o-document-duplicate')
+                            ->modalDescription('Duplicate playlist now?')
+                            ->modalSubmitActionLabel('Yes, duplicate now')
+                            ->hidden(fn ($record): bool => $record->is_network_playlist || $record->source_type !== null),
+
+                        Action::make('Copy Changes')
+                            ->label('Copy Changes')
+                            ->schema([
+                                Select::make('target_playlist_id')
+                                    ->label('Target Playlist')
+                                    ->options(function ($record) {
+                                        return Playlist::where('id', '!=', $record->id)
+                                            ->where('user_id', auth()->id())
+                                            ->orderBy('name')
+                                            ->pluck('name', 'id')
+                                            ->toArray();
+                                    })
+                                    ->searchable()
+                                    ->required(),
+                                Select::make('channel_match_attributes')
+                                    ->label('Channel Match Attributes')
+                                    ->options([
+                                        'name' => 'Name',
+                                        'title' => 'Title',
+                                        'url' => 'URL',
+                                        'stream_id' => 'TVG-ID/Stream ID',
+                                        'station_id' => 'Station ID (tvc-guide-stationid)',
+                                        'logo_internal' => 'Logo (tvg-logo)',
+                                        'channel' => 'Channel Number (tvg-chno/num)',
+                                    ])
+                                    ->hintIcon(
+                                        'heroicon-s-information-circle',
+                                        tooltip: 'Select the channel attributes to match channels between the source and target playlists. Channels will be matched based on these attributes. If multiple attributes are selected, all must match for a channel to be considered the same.',
+                                    )
+                                    ->multiple()
+                                    ->required()
+                                    ->default(['url'])
+                                    ->columnSpanFull(),
+                                Toggle::make('create_missing_channels')
+                                    ->label('Create Missing Channels')
+                                    ->live()
+                                    ->hintIcon(
+                                        'heroicon-s-information-circle',
+                                        tooltip: 'If enabled, missing channels will be created in the target playlist. If disabled, only existing matched channels will be updated.',
+                                    )
+                                    ->default(false),
+                                Toggle::make('all_attributes')
+                                    ->label('All Attributes')
+                                    ->live()
+                                    ->hintIcon(
+                                        'heroicon-s-information-circle',
+                                        tooltip: 'If enabled, all channel attributes will be copied to the target playlist. If disabled, only the selected attributes below will be copied.',
+                                    )
+                                    ->default(true),
+                                Select::make('channel_attributes')
+                                    ->label('Channel Attributes to Copy')
+                                    ->options([
+                                        'enabled' => 'Enabled Status',
+                                        'name' => 'Name',
+                                        'title' => 'Title',
+                                        'logo_internal' => 'Logo (tvg-logo)',
+                                        'stream_id' => 'TVG-ID/Stream ID',
+                                        'station_id' => 'Station ID (tvc-guide-stationid)',
+                                        'group' => 'Group (group-title)',
+                                        'shift' => 'Shift (tvg-shift)',
+                                        'channel' => 'Channel Number (tvg-chno/num)',
+                                        'sort' => 'Sort Order',
+                                    ])
+                                    ->multiple()
+                                    ->required()
+                                    ->helperText('Select the channel attributes you want to copy to the target playlist.')
+                                    ->hidden(fn ($get) => (bool) $get('all_attributes')),
+                                Toggle::make('overwrite')
+                                    ->label('Overwrite Existing Attributes')
+                                    ->hintIcon(
+                                        'heroicon-s-information-circle',
+                                        tooltip: 'If enabled, existing custom attributes in the target playlist will be overwritten. If disabled, only empty custom attributes will be updated.',
+                                    )
+                                    ->default(true),
+                            ])
+                            ->action(function ($record, $data) {
+                                app('Illuminate\Contracts\Bus\Dispatcher')
+                                    ->dispatch(new CopyAttributesToPlaylist(
+                                        source: $record,
+                                        targetId: $data['target_playlist_id'],
+                                        channelAttributes: $data['channel_attributes'] ?? [],
+                                        channelMatchAttributes: $data['channel_match_attributes'] ?? ['url'],
+                                        createIfMissing: $data['create_missing_channels'] ?? false,
+                                        allAttributes: $data['all_attributes'] ?? false,
+                                        overwrite: $data['overwrite'] ?? false,
+                                    ));
+                            })->after(function () {
+                                Notification::make()
+                                    ->success()
+                                    ->title('Playlist settings are being copied')
+                                    ->body('Playlist settings are being copied in the background. You will be notified on completion.')
+                                    ->duration(3000)
+                                    ->send();
+                            })
+                            ->hidden(fn ($record): bool => $record->source_type !== null)
+                            ->requiresConfirmation()
+                            ->icon('heroicon-o-clipboard-document')
+                            ->modalIcon('heroicon-o-clipboard-document')
+                            ->modalDescription('Select the target playlist and channel attributes to copy')
+                            ->modalSubmitActionLabel('Copy now')
+                            ->hidden(fn ($record): bool => $record->is_network_playlist || $record->source_type !== null),
+
+                        Action::make('view_sync_logs')
+                            ->label('View Sync Logs')
+                            ->color('gray')
+                            ->icon('heroicon-m-arrows-right-left')
+                            ->url(function (Playlist $record): string {
+                                return "/playlists/{$record->id}/playlist-sync-statuses";
+                            })
+                            ->openUrlInNewTab(false)
+                            ->hidden(fn (Playlist $record): bool => $record->is_network_playlist || $record->source_type !== null),
+                        Action::make('reset')
+                            ->label('Reset status')
+                            ->icon('heroicon-o-arrow-uturn-left')
+                            ->color('warning')
+                            ->action(function ($record) {
+                                $record->update([
+                                    'status' => Status::Pending,
+                                    'processing' => [
+                                        'live_processing' => false,
+                                        'vod_processing' => false,
+                                        'series_processing' => false,
+                                    ],
+                                    'progress' => 0,
+                                    'series_progress' => 0,
+                                    'vod_progress' => 0,
+                                    'channels' => 0,
+                                    'synced' => null,
+                                    'errors' => null,
+                                ]);
+                            })->after(function () {
+                                Notification::make()
+                                    ->success()
+                                    ->title('Playlist status reset')
+                                    ->body('Playlist status has been reset.')
+                                    ->duration(3000)
+                                    ->send();
+                            })
+                            ->requiresConfirmation()
+                            ->icon('heroicon-o-arrow-uturn-left')
+                            ->modalIcon('heroicon-o-arrow-uturn-left')
+                            ->modalDescription('Reset playlist status so it can be processed again. Only perform this action if you are having problems with the playlist syncing.')
+                            ->modalSubmitActionLabel('Yes, reset now')
+                            ->hidden(fn ($record): bool => $record->is_network_playlist || $record->source_type !== null),
+                        Action::make('purge_series')
+                            ->label('Purge Series')
+                            ->icon('heroicon-s-trash')
+                            ->color('danger')
+                            ->action(function ($record) {
+                                $record->series()->delete();
+                            })
+                            ->requiresConfirmation()
+                            ->icon('heroicon-s-trash')
+                            ->modalIcon('heroicon-s-trash')
+                            ->modalDescription('This action will permanently delete all series associated with the playlist. Proceed with caution.')
+                            ->modalSubmitActionLabel('Purge now')
+                            ->hidden(fn ($record): bool => ! $record->xtream),
+                        DeleteAction::make()
+                            ->disabled(fn ($record): bool => $record->isProcessing()),
+                    ])->button()->hiddenLabel()->size('sm'),
                 EditAction::make()->button()->hiddenLabel()->size('sm'),
                 ViewAction::make()
                     ->button()->hiddenLabel()->size('sm'),
@@ -577,6 +700,18 @@ class PlaylistResource extends Resource
                         ->label('Process selected')
                         ->action(function (Collection $records): void {
                             foreach ($records as $record) {
+                                // For media server playlists, dispatch the media server sync job
+                                if (in_array($record->source_type, [PlaylistSourceType::Emby, PlaylistSourceType::Jellyfin])) {
+                                    $integration = MediaServerIntegration::where('playlist_id', $record->id)->first();
+                                    if ($integration) {
+                                        app('Illuminate\Contracts\Bus\Dispatcher')
+                                            ->dispatch(new SyncMediaServer($integration->id));
+
+                                        continue;
+                                    }
+                                }
+
+                                // For regular playlists, use the standard M3U import process
                                 $record->update([
                                     'status' => Status::Processing,
                                     'progress' => 0,
@@ -635,7 +770,7 @@ class PlaylistResource extends Resource
                     DeleteBulkAction::make(),
                 ]),
             ])->checkIfRecordIsSelectableUsing(
-                fn ($record): bool => $record->status !== Status::Processing,
+                fn ($record): bool => $record->status !== Status::Processing && $record->source_type === null,
             );
     }
 
@@ -666,17 +801,34 @@ class PlaylistResource extends Resource
                     ->label('Sync and Process')
                     ->icon('heroicon-o-arrow-path')
                     ->action(function ($record) {
+                        // For media server playlists, dispatch the media server sync job
+                        if (in_array($record->source_type, [PlaylistSourceType::Emby, PlaylistSourceType::Jellyfin])) {
+                            $integration = MediaServerIntegration::where('playlist_id', $record->id)->first();
+                            if ($integration) {
+                                app('Illuminate\Contracts\Bus\Dispatcher')
+                                    ->dispatch(new SyncMediaServer($integration->id));
+
+                                return;
+                            }
+                        }
+
+                        // For regular playlists, use the standard M3U import process
                         $record->update([
                             'status' => Status::Processing,
                             'progress' => 0,
                         ]);
                         app('Illuminate\Contracts\Bus\Dispatcher')
                             ->dispatch(new ProcessM3uImport($record, force: true));
-                    })->after(function () {
+                    })->after(function ($record) {
+                        $isMediaServer = in_array($record->source_type, [PlaylistSourceType::Emby, PlaylistSourceType::Jellyfin]);
+                        $message = $isMediaServer
+                            ? 'Media server content is being synced in the background. Depending on the size of your library, this may take several minutes. You will be notified on completion.'
+                            : 'Playlist is being processed in the background. Depending on the size of your playlist, this may take a while. You will be notified on completion.';
+
                         Notification::make()
                             ->success()
-                            ->title('Playlist is processing')
-                            ->body('Playlist is being processed in the background. Depending on the size of your playlist, this may take a while. You will be notified on completion.')
+                            ->title($isMediaServer ? 'Media server sync started' : 'Playlist is processing')
+                            ->body($message)
                             ->duration(10000)
                             ->send();
                     })
@@ -684,8 +836,14 @@ class PlaylistResource extends Resource
                     ->requiresConfirmation()
                     ->icon('heroicon-o-arrow-path')
                     ->modalIcon('heroicon-o-arrow-path')
-                    ->modalDescription('Process playlist now?')
-                    ->modalSubmitActionLabel('Yes, process now'),
+                    ->modalDescription(function ($record) {
+                        $isMediaServer = in_array($record->source_type, [PlaylistSourceType::Emby, PlaylistSourceType::Jellyfin]);
+
+                        return $isMediaServer
+                            ? 'Sync content from the media server now? This will fetch all movies, series, and episodes from your media server library.'
+                            : 'Process playlist now?';
+                    })
+                    ->modalSubmitActionLabel('Yes, sync now'),
                 Action::make('process_series')
                     ->label('Fetch Series Metadata')
                     ->icon('heroicon-o-arrow-down-tray')
@@ -791,6 +949,7 @@ class PlaylistResource extends Resource
                             ->duration(3000)
                             ->send();
                     })
+                    ->hidden(fn ($record): bool => $record->source_type !== null)
                     ->requiresConfirmation()
                     ->icon('heroicon-o-document-duplicate')
                     ->modalIcon('heroicon-o-document-duplicate')
@@ -828,7 +987,8 @@ class PlaylistResource extends Resource
                     ->modalIcon('heroicon-o-arrow-uturn-left')
                     ->modalDescription('Reset playlist status so it can be processed again. Only perform this action if you are having problems with the playlist syncing.')
                     ->modalSubmitActionLabel('Yes, reset now'),
-                DeleteAction::make(),
+                DeleteAction::make()
+                    ->disabled(fn ($record): bool => $record->isProcessing()),
             ])->button(),
         ];
     }
@@ -1049,6 +1209,362 @@ class PlaylistResource extends Resource
                         ->inline(false)
                         ->default(false),
                 ]),
+
+            // Provider Profiles Section (Xtream only)
+            Section::make('Provider Profiles')
+                ->description('Pool multiple Xtream accounts from this provider to increase concurrent stream capacity.')
+                ->icon('heroicon-o-user-group')
+                ->collapsible()
+                ->collapsed(fn (?Playlist $record): bool => ! ($record?->profiles_enabled ?? false))
+                ->hidden(fn (Get $get): bool => ! $get('xtream'))
+                ->schema([
+                    Toggle::make('profiles_enabled')
+                        ->label('Enable Provider Profiles')
+                        ->helperText('When enabled, proxy mode is required for accurate connection tracking.')
+                        ->live()
+                        ->afterStateUpdated(function (Set $set, $state) {
+                            if ($state) {
+                                $set('enable_proxy', true);
+                            }
+                        })
+                        ->rules([
+                            fn (): \Closure => function (string $attribute, $value, \Closure $fail) {
+                                if ($value && ! config('proxy.m3u_proxy_token')) {
+                                    $fail('Provider Profiles require the m3u-proxy to be configured. Please ensure M3U_PROXY_TOKEN is set.');
+                                }
+                            },
+                        ])
+                        ->inline(false)
+                        ->default(false),
+
+                    Grid::make()
+                        ->columns(2)
+                        ->visible(fn (Get $get): bool => $get('profiles_enabled'))
+                        ->schema([
+                            Placeholder::make('primary_profile_info')
+                                ->label('Primary Account')
+                                ->content(function (?Playlist $record): string {
+                                    if (! $record || ! $record->xtream_config) {
+                                        return 'Configure Xtream credentials above first.';
+                                    }
+
+                                    $username = $record->xtream_config['username'] ?? 'Unknown';
+                                    $primaryProfile = $record->profiles()->where('is_primary', true)->first();
+
+                                    if ($primaryProfile) {
+                                        $maxStreams = $primaryProfile->max_streams ?? 1;
+                                        $providerMax = $primaryProfile->provider_max_connections ?? 'Unknown';
+
+                                        return "Username: {$username} | Max Streams: {$maxStreams} (Provider: {$providerMax})";
+                                    }
+
+                                    return "Username: {$username} (Profile will be created when saved)";
+                                }),
+
+                            \Filament\Schemas\Components\Actions::make([
+                                \Filament\Actions\Action::make('test_primary_profile')
+                                    ->label('Test Primary')
+                                    ->icon('heroicon-o-signal')
+                                    ->color('info')
+                                    ->tooltip('Test primary account credentials and detect max connections')
+                                    ->action(function (Get $get, ?Playlist $record): void {
+                                        $xtreamConfig = $record?->xtream_config;
+
+                                        if (! $xtreamConfig) {
+                                            // Try to build from form data
+                                            $url = $get('xtream_config.url') ?? $get('xtream_config.server');
+                                            $username = $get('xtream_config.username');
+                                            $password = $get('xtream_config.password');
+
+                                            if (empty($url) || empty($username) || empty($password)) {
+                                                Notification::make()
+                                                    ->title('Missing Credentials')
+                                                    ->body('Please configure Xtream credentials first.')
+                                                    ->danger()
+                                                    ->send();
+
+                                                return;
+                                            }
+
+                                            $xtreamConfig = [
+                                                'url' => $url,
+                                                'username' => $username,
+                                                'password' => $password,
+                                            ];
+                                        } else {
+                                            $xtreamConfig = [
+                                                'url' => $xtreamConfig['url'] ?? $xtreamConfig['server'] ?? '',
+                                                'username' => $xtreamConfig['username'] ?? '',
+                                                'password' => $xtreamConfig['password'] ?? '',
+                                            ];
+                                        }
+
+                                        $result = ProfileService::testCredentials($xtreamConfig);
+
+                                        if ($result['valid']) {
+                                            // If the primary profile exists, only update max_streams when not manually set
+                                            $primaryProfile = $record?->profiles()->where('is_primary', true)->first();
+                                            if ($primaryProfile) {
+                                                $currentMax = $primaryProfile->max_streams ?? null;
+                                                $shouldUpdateMax = ! $currentMax || $currentMax <= 1;
+
+                                                if ($shouldUpdateMax && $result['max_connections'] > 0) {
+                                                    $primaryProfile->update(['max_streams' => $result['max_connections']]);
+                                                }
+                                            }
+
+                                            $expDate = $result['exp_date'] ? " | Expires: {$result['exp_date']}" : '';
+                                            Notification::make()
+                                                ->title('Primary Account Valid ✓')
+                                                ->body("Status: {$result['status']} | Max Connections: {$result['max_connections']} | Active: {$result['active_cons']}{$expDate}")
+                                                ->success()
+                                                ->duration(8000)
+                                                ->send();
+                                        } else {
+                                            Notification::make()
+                                                ->title('Primary Account Test Failed')
+                                                ->body($result['error'] ?? 'Unknown error')
+                                                ->danger()
+                                                ->send();
+                                        }
+                                    }),
+                            ])->verticallyAlignEnd(),
+                        ]),
+
+                    Repeater::make('additional_profiles')
+                        ->label('Additional Profiles')
+                        ->relationship('profiles', fn ($query) => $query->where('is_primary', false)->orderBy('priority'))
+                        ->visible(fn (Get $get): bool => $get('profiles_enabled'))
+                        ->schema([
+                            TextInput::make('name')
+                                ->label('Profile Name')
+                                ->placeholder('Backup Account')
+                                ->columnSpan(2),
+                            TextInput::make('url')
+                                ->label('Provider URL')
+                                ->placeholder(fn (Get $get, $livewire) => $livewire->getRecord()?->xtream_config['url'] ?? 'http://provider.com:port')
+                                ->helperText('Leave blank to use the same provider as the primary account.')
+                                ->columnSpan(2),
+                            TextInput::make('username')
+                                ->label('Username')
+                                ->required()
+                                ->live(onBlur: true)
+                                ->columnSpan(1),
+                            TextInput::make('password')
+                                ->label('Password')
+                                ->password()
+                                ->revealable()
+                                ->required(fn ($record) => $record === null) // Only required for new profiles
+                                ->dehydrated(fn ($state, $record) => filled($state) || $record === null) // Only save if filled or new
+                                ->dehydrateStateUsing(fn ($state, $record) => filled($state) ? $state : $record?->password)
+                                ->placeholder(fn ($record) => $record?->password ? '••••••••' : null)
+                                ->live(onBlur: true)
+                                ->columnSpan(1),
+                            TextInput::make('max_streams')
+                                ->label('Max Streams')
+                                ->numeric()
+                                ->default(1)
+                                ->minValue(1)
+                                ->helperText('Use "Test" to auto-detect from provider.')
+                                ->columnSpan(1),
+                            TextInput::make('priority')
+                                ->label('Priority')
+                                ->numeric()
+                                ->default(fn ($record) => PlaylistProfile::where('playlist_id', $record?->playlist_id)->max('priority') + 1 ?? 1)
+                                ->helperText('Lower = tried first')
+                                ->columnSpan(1),
+                            Toggle::make('enabled')
+                                ->label('Enabled')
+                                ->default(true)
+                                ->inline(false)
+                                ->columnSpan(1),
+                        ])
+                        ->columns(4)
+                        ->addActionLabel('Add Profile')
+                        ->reorderable()
+                        ->collapsible()
+                        ->itemLabel(fn (array $state): ?string => $state['name'] ?? $state['username'] ?? 'New Profile')
+                        ->extraItemActions([
+                            \Filament\Actions\Action::make('test_profile')
+                                ->label('Test')
+                                ->icon('heroicon-o-signal')
+                                ->color('info')
+                                ->tooltip('Test credentials and auto-detect max connections')
+                                ->action(function (array $arguments, Repeater $component, Get $get, Set $set, ?Playlist $record): void {
+                                    // Get the item data directly from the repeater's state
+                                    $itemKey = $arguments['item'];
+                                    $allItems = $component->getState();
+                                    $profileData = $allItems[$itemKey] ?? null;
+
+                                    // If password is empty, try to get it from the existing database record
+                                    $password = $profileData['password'] ?? null;
+                                    if (empty($password) && ! empty($profileData['id'])) {
+                                        $existingProfile = PlaylistProfile::find($profileData['id']);
+                                        $password = $existingProfile?->password;
+                                    }
+
+                                    if (! $profileData || empty($profileData['username']) || empty($password)) {
+                                        Notification::make()
+                                            ->title('Missing Credentials')
+                                            ->body('Please enter username and password first.')
+                                            ->danger()
+                                            ->send();
+
+                                        return;
+                                    }
+
+                                    // Use profile's URL if provided, otherwise use playlist's base URL
+                                    $url = $profileData['url'] ?? $record?->xtream_config['url'] ?? $record?->xtream_config['server'] ?? null;
+
+                                    if (empty($url)) {
+                                        Notification::make()
+                                            ->title('Missing URL')
+                                            ->body('Please provide a provider URL or configure the playlist Xtream URL.')
+                                            ->danger()
+                                            ->send();
+
+                                        return;
+                                    }
+
+                                    // Build xtream config for testing
+                                    $testConfig = [
+                                        'url' => $url,
+                                        'username' => $profileData['username'],
+                                        'password' => $password,
+                                    ];
+
+                                    $result = ProfileService::testCredentials($testConfig);
+
+                                    if ($result['valid']) {
+                                        $currentMax = $allItems[$itemKey]['max_streams'] ?? null;
+                                        $shouldUpdateMax = ! $currentMax || $currentMax <= 1;
+
+                                        if ($shouldUpdateMax && $result['max_connections'] > 0) {
+                                            $allItems[$itemKey]['max_streams'] = $result['max_connections'];
+                                            $component->state($allItems);
+                                        }
+
+                                        $expDate = $result['exp_date'] ? " | Expires: {$result['exp_date']}" : '';
+                                        Notification::make()
+                                            ->title('Profile Valid ✓')
+                                            ->body("Status: {$result['status']} | Max Connections: {$result['max_connections']} | Active: {$result['active_cons']}{$expDate}")
+                                            ->success()
+                                            ->duration(8000)
+                                            ->send();
+                                    } else {
+                                        Notification::make()
+                                            ->title('Profile Test Failed')
+                                            ->body($result['error'] ?? 'Unknown error')
+                                            ->danger()
+                                            ->send();
+                                    }
+                                }),
+                        ])
+                        ->mutateRelationshipDataBeforeCreateUsing(function (array $data, Get $get, $livewire): array {
+                            $record = $livewire->getRecord();
+                            $data['user_id'] = $record->user_id;
+                            $data['playlist_id'] = $record->id;
+
+                            // Auto-test credentials and populate max_streams if not manually set or set to default
+                            if (($data['max_streams'] ?? 1) <= 1 && ! empty($data['username']) && ! empty($data['password'])) {
+                                // Use profile URL if provided, otherwise use playlist URL
+                                $url = $data['url'] ?? $record->xtream_config['url'] ?? $record->xtream_config['server'] ?? null;
+                                if ($url) {
+                                    $testConfig = [
+                                        'url' => $url,
+                                        'username' => $data['username'],
+                                        'password' => $data['password'],
+                                    ];
+                                    $result = ProfileService::testCredentials($testConfig);
+                                    if ($result['valid'] && $result['max_connections'] > 1) {
+                                        $data['max_streams'] = $result['max_connections'];
+                                    }
+                                }
+                            }
+
+                            return $data;
+                        })
+                        ->mutateRelationshipDataBeforeSaveUsing(function (array $data, Get $get, $livewire, $record): array {
+                            $playlist = $livewire->getRecord();
+
+                            // If password is empty but we have an existing record, preserve the old password
+                            if (empty($data['password']) && $record instanceof PlaylistProfile) {
+                                $data['password'] = $record->password;
+                            }
+
+                            // If URL is empty but we have an existing record, preserve the old URL
+                            if (empty($data['url']) && $record instanceof PlaylistProfile) {
+                                $data['url'] = $record->url;
+                            }
+
+                            // Auto-test credentials and update max_streams if still at default
+                            if (($data['max_streams'] ?? 1) <= 1 && ! empty($data['username']) && ! empty($data['password'])) {
+                                // Use profile URL if provided, otherwise use playlist URL
+                                $url = $data['url'] ?? $playlist->xtream_config['url'] ?? $playlist->xtream_config['server'] ?? null;
+                                if ($url) {
+                                    $testConfig = [
+                                        'url' => $url,
+                                        'username' => $data['username'],
+                                        'password' => $data['password'],
+                                    ];
+                                    $result = ProfileService::testCredentials($testConfig);
+                                    if ($result['valid'] && $result['max_connections'] > 1) {
+                                        $data['max_streams'] = $result['max_connections'];
+                                    }
+                                }
+                            }
+
+                            return $data;
+                        }),
+
+                    Placeholder::make('pool_status')
+                        ->label('Pool Status')
+                        ->content(function (?Playlist $record, Get $get): HtmlString {
+                            if (! $record || ! $record->profiles_enabled) {
+                                return new HtmlString('Enable profiles to see pool status.');
+                            }
+                            $status = ProfileService::getPoolStatus($record);
+
+                            // Check if primary profile exists - if not, estimate from xtream_status
+                            $hasPrimaryProfile = collect($status['profiles'])->contains('is_primary', true);
+                            if (! $hasPrimaryProfile && $record->xtream) {
+                                // Primary profile will be created on save - show estimated capacity
+                                $primaryMax = $record->xtream_status['user_info']['max_connections'] ?? 1;
+                                $primaryActive = $record->xtream_status['user_info']['active_cons'] ?? 0;
+
+                                // Add pending primary to the display
+                                array_unshift($status['profiles'], [
+                                    'is_primary' => true,
+                                    'name' => 'Primary (pending)',
+                                    'username' => $record->xtream_config['username'] ?? '',
+                                    'enabled' => true,
+                                    'max_streams' => $primaryMax,
+                                    'active_connections' => $primaryActive,
+                                ]);
+                                $status['total_capacity'] += $primaryMax;
+                                $status['total_active'] += $primaryActive;
+                                $status['available'] = max(0, $status['total_capacity'] - $status['total_active']);
+                            }
+
+                            // Build profile breakdown
+                            $profileLines = [];
+                            foreach ($status['profiles'] as $profile) {
+                                $name = $profile['is_primary'] ? '⭐ Primary' : ($profile['name'] ?? $profile['username']);
+                                $statusIcon = $profile['enabled'] ? '✓' : '✗';
+                                $profileLines[] = "{$statusIcon} {$name}: {$profile['active_connections']}/{$profile['max_streams']} streams";
+                            }
+
+                            $html = "<div class='space-y-1'>";
+                            $html .= "<div class='font-semibold'>Total: {$status['total_active']}/{$status['total_capacity']} active | {$status['available']} available</div>";
+                            if (count($profileLines) > 0) {
+                                $html .= "<div class='text-sm text-gray-500 dark:text-gray-400'>".implode('<br>', $profileLines).'</div>';
+                            }
+                            $html .= '</div>';
+
+                            return new HtmlString($html);
+                        })
+                        ->visible(fn (Get $get, ?Playlist $record): bool => $get('profiles_enabled') && $record?->exists),
+                ]),
         ];
 
         $schedulingFields = [
@@ -1071,38 +1587,6 @@ class PlaylistResource extends Resource
                                 ->helperText('When enabled, a backup will be created before syncing.')
                                 ->inline(false)
                                 ->default(false),
-                            Toggle::make('auto_merge_channels_enabled')
-                                ->label('Auto-merge channels after sync')
-                                ->helperText('When enabled, channels with the same stream ID will be automatically merged with failover relationships after each sync.')
-                                ->live()
-                                ->inline(false)
-                                ->default(false),
-                            Toggle::make('auto_merge_deactivate_failover')
-                                ->label('Deactivate failover channels')
-                                ->helperText('When enabled, all failover channels will be automatically deactivated during the merge process, keeping only the master channel active.')
-                                ->inline(false)
-                                ->default(false)
-                                ->hidden(fn (Get $get): bool => ! $get('auto_merge_channels_enabled')),
-                        ]),
-
-                    Fieldset::make('Auto-Merge advanced settings')
-                        ->columnSpanFull()
-                        ->hidden(fn (Get $get): bool => ! $get('auto_merge_channels_enabled'))
-                        ->schema([
-                            static::makeToggle('auto_merge_config.check_resolution')
-                                ->label('Prioritize by resolution')
-                                ->hintIcon(
-                                    'heroicon-m-exclamation-triangle',
-                                    tooltip: 'This process takes longer as stream resolution needs to be analyzed. Only recommended for smaller playlists.'
-                                )
-                                ->helperText('When enabled, channels with higher resolution will be prioritized as master channels during merge.'),
-                            static::makeToggle('auto_merge_config.force_complete_remerge')
-                                ->label('Force complete re-merge')
-                                ->hintIcon(
-                                    'heroicon-m-exclamation-triangle',
-                                    tooltip: 'Disable this for better performance if you only want to merge new channels.'
-                                )
-                                ->helperText('When enabled, all channels will be re-evaluated during merge, including existing failover relationships.'),
                         ]),
 
                     TextInput::make('sync_interval')
@@ -1110,6 +1594,7 @@ class PlaylistResource extends Resource
                         ->suffix(config('app.timezone'))
                         ->rules([new Cron])
                         ->live()
+                        ->placeholder('0 0 * * *')
                         ->columnSpanFull()
                         ->hintAction(
                             Action::make('view_cron_example')
@@ -1140,21 +1625,16 @@ class PlaylistResource extends Resource
             Section::make('Playlist Processing')
                 ->description('Processing settings for the playlist')
                 ->columnSpanFull()
-                ->columns(2)
+                ->columns(columns: 2)
                 ->schema([
                     Toggle::make('import_prefs.preprocess')
                         ->label('Preprocess playlist')
-                        ->columnSpan(1)
+                        ->columnSpanFull()
                         ->live()
                         ->inline(true)
                         ->default(false)
                         ->helperText('When enabled, the playlist will be preprocessed before importing. You can then select which groups you would like to import.'),
-                    Toggle::make('enable_channels')
-                        ->label('Enable new channels')
-                        ->columnSpan(1)
-                        ->inline(true)
-                        ->default(false)
-                        ->helperText('When enabled, newly added channels will be enabled by default.'),
+
                     Toggle::make('import_prefs.use_regex')
                         ->label('Use regex for filtering')
                         ->columnSpan(2)
@@ -1199,6 +1679,9 @@ class PlaylistResource extends Resource
                                 ->getOptionLabelFromRecordUsing(fn ($record) => $record->name)
                                 ->getOptionLabelsUsing(function (array $values, $record): array {
                                     // Values are IDs, return id => name pairs
+                                    // Need to filter out strings (names) that may exist from previous storage format
+                                    $values = array_filter($values, fn ($value) => is_numeric($value));
+
                                     return SourceGroup::where('playlist_id', $record?->id)
                                         ->where('type', 'live')
                                         ->whereIn('id', $values)
@@ -1285,6 +1768,9 @@ class PlaylistResource extends Resource
                                 ->getOptionLabelFromRecordUsing(fn ($record) => $record->name)
                                 ->getOptionLabelsUsing(function (array $values, $record): array {
                                     // Values are IDs, return id => name pairs
+                                    // Need to filter out strings (names) that may exist from previous storage format
+                                    $values = array_filter($values, fn ($value) => is_numeric($value));
+
                                     return SourceGroup::where('playlist_id', $record?->id)
                                         ->where('type', 'vod')
                                         ->whereIn('id', $values)
@@ -1370,6 +1856,9 @@ class PlaylistResource extends Resource
                                 ->getOptionLabelFromRecordUsing(fn ($record) => $record->name)
                                 ->getOptionLabelsUsing(function (array $values, $record): array {
                                     // Values are IDs, return id => name pairs
+                                    // Need to filter out strings (names) that may exist from previous storage format
+                                    $values = array_filter($values, fn ($value) => is_numeric($value));
+
                                     return SourceCategory::where('playlist_id', $record?->id)
                                         ->whereIn('id', $values)
                                         ->pluck('name', 'id')  // id => name
@@ -1421,13 +1910,54 @@ class PlaylistResource extends Resource
                     TagsInput::make('import_prefs.ignored_file_types')
                         ->label('Ignored file types')
                         ->helperText('Press [tab] or [return] to add item. You can ignore certain file types from being imported (.e.g.: ".mkv", ".mp4", etc.) This is useful for ignoring VOD or other unwanted content.')
-                        ->columnSpan(2)
+                        ->columnSpanFull()
                         ->suggestions([
                             '.avi',
                             '.mkv',
                             '.mp4',
                         ])->splitKeys(['Tab', 'Return']),
                 ]),
+
+            Section::make('Auto-Enable Settings')
+                ->description('Settings for automatically enabling new content')
+                ->columnSpanFull()
+                ->collapsible()
+                ->collapsed($creating)
+                ->columns(2)
+                ->schema([
+                    Toggle::make('enable_channels')
+                        ->label('Enable new channels')
+                        ->columnSpanFull()
+                        ->live()
+                        ->inline(true)
+                        ->default(false)
+                        ->helperText('When enabled, newly added Live and VOD channels will be enabled by default.'),
+
+                    Fieldset::make('Default options for new channels')
+                        ->columnSpanFull()
+                        ->schema([
+                            Toggle::make('import_prefs.channel_default_mapping_enabled')
+                                ->label('Enable EPG mapping by default')
+                                ->inline(true)
+                                ->default(true)
+                                ->helperText('When enabled, newly added channels will have EPG mapping enabled by default on sync.'),
+                            Toggle::make('import_prefs.channel_default_merge_enabled')
+                                ->label('Enable merging by default')
+                                ->inline(true)
+                                ->default(true)
+                                ->helperText('When enabled, newly added channels will have merging enabled by default on sync.'),
+                        ])
+                        ->hidden(fn (Get $get): bool => ! $get('enable_channels')),
+
+                    Toggle::make('enable_series')
+                        ->label('Enable new series')
+                        ->columnSpanFull()
+                        ->live()
+                        ->inline(true)
+                        ->default(false)
+                        ->helperText('When enabled, newly added series will be enabled by default on sync.'),
+                ]),
+
             Section::make('Series Processing')
                 ->description('Processing options for playlist series')
                 ->columnSpanFull()
@@ -1490,6 +2020,219 @@ class PlaylistResource extends Resource
                         ->default(false)
                         ->helperText('When enabled, VOD channels will be included in the M3U output.'),
                 ])->hidden(fn (Get $get): bool => ! $get('xtream')),
+
+            Section::make('Auto-Merge Processing')
+                ->description('Automatically merge channels with the same stream ID into failover relationships after sync')
+                ->columnSpanFull()
+                ->collapsible()
+                ->collapsed($creating)
+                ->columns(2)
+                ->schema([
+                    Toggle::make('auto_merge_channels_enabled')
+                        ->label('Enable auto-merge after sync')
+                        ->helperText('When enabled, channels with the same stream ID will be automatically merged with failover relationships after each sync.')
+                        ->columnSpanFull()
+                        ->live()
+                        ->inline(false)
+                        ->default(false),
+
+                    Fieldset::make('Merge source configuration')
+                        ->columnSpanFull()
+                        ->columns(2)
+                        ->hidden(fn (Get $get): bool => ! $get('auto_merge_channels_enabled'))
+                        ->schema([
+                            Select::make('auto_merge_config.preferred_playlist_id')
+                                ->label('Preferred Playlist (optional)')
+                                ->options(fn () => Playlist::where('user_id', auth()->id())->pluck('name', 'id'))
+                                ->searchable()
+                                ->columnSpanFull()
+                                ->placeholder('Use this playlist only')
+                                ->helperText('If set, channels from this playlist will be prioritized as master during merge. Leave empty to only merge within this playlist.'),
+                            Repeater::make('auto_merge_config.failover_playlists')
+                                ->label('Additional Failover Playlists (optional)')
+                                ->helperText('Select additional playlists to include as failover sources. Leave empty to only merge channels within this playlist.')
+                                ->reorderable()
+                                ->reorderableWithButtons()
+                                ->simple(
+                                    Select::make('playlist_failover_id')
+                                        ->label('Failover Playlist')
+                                        ->options(fn () => Playlist::where('user_id', auth()->id())->pluck('name', 'id'))
+                                        ->searchable()
+                                        ->required()
+                                )
+                                ->distinct()
+                                ->columns(1)
+                                ->addActionLabel('Add failover playlist')
+                                ->columnSpanFull()
+                                ->defaultItems(0),
+                        ]),
+
+                    Fieldset::make('Merge behavior')
+                        ->columnSpanFull()
+                        ->columns(2)
+                        ->hidden(fn (Get $get): bool => ! $get('auto_merge_channels_enabled'))
+                        ->schema([
+                            Toggle::make('auto_merge_config.check_resolution')
+                                ->label('Prioritize by resolution')
+                                ->inline(false)
+                                ->default(false)
+                                ->hintIcon(
+                                    'heroicon-m-exclamation-triangle',
+                                    tooltip: '⚠️ IPTV WARNING: This will analyze each stream to determine resolution, which may cause rate limiting or blocking with IPTV providers.'
+                                )
+                                ->helperText('When enabled, channels with higher resolution will be prioritized as master.'),
+                            Toggle::make('auto_merge_config.force_complete_remerge')
+                                ->label('Force complete re-merge')
+                                ->inline(false)
+                                ->default(false)
+                                ->hintIcon(
+                                    'heroicon-m-exclamation-triangle',
+                                    tooltip: 'This will re-evaluate ALL existing failover relationships on each sync.'
+                                )
+                                ->helperText('When enabled, all channels will be re-evaluated during merge, including existing failover relationships.'),
+                            Toggle::make('auto_merge_config.new_channels_only')
+                                ->label('Merge only new channels')
+                                ->inline(false)
+                                ->hintIcon(
+                                    'heroicon-m-exclamation-triangle',
+                                    tooltip: 'When enabled, only newly synced channels will be merged. Disable to re-process all channels on each sync.'
+                                )
+                                ->default(true),
+                            Toggle::make('auto_merge_deactivate_failover')
+                                ->label('Deactivate failover channels')
+                                ->inline(false)
+                                ->hintIcon(
+                                    'heroicon-m-exclamation-triangle',
+                                    tooltip: 'When enabled, channels that become failovers will be automatically disabled.'
+                                )
+                                ->default(false),
+                            Toggle::make('auto_merge_config.prefer_catchup_as_primary')
+                                ->label('Prefer catch-up as primary')
+                                ->inline(false)
+                                ->hintIcon(
+                                    'heroicon-m-exclamation-triangle',
+                                    tooltip: 'When enabled, channels with catch-up enabled will be selected as the master when available.'
+                                )
+                                ->default(false),
+                            Toggle::make('auto_merge_config.exclude_disabled_groups')
+                                ->label('Exclude disabled groups from master selection')
+                                ->inline(false)
+                                ->hintIcon(
+                                    'heroicon-m-exclamation-triangle',
+                                    tooltip: 'Channels from disabled groups will never be selected as master, only as failovers.'
+                                )
+                                ->default(false),
+                        ]),
+
+                    Fieldset::make('Advanced Priority Scoring (optional)')
+                        ->columnSpanFull()
+                        ->columns(2)
+                        ->hidden(fn (Get $get): bool => ! $get('auto_merge_channels_enabled'))
+                        ->schema([
+                            Select::make('auto_merge_config.prefer_codec')
+                                ->label('Preferred Codec')
+                                ->options([
+                                    'hevc' => 'HEVC / H.265 (smaller file size)',
+                                    'h264' => 'H.264 / AVC (better compatibility)',
+                                ])
+                                ->placeholder('No preference')
+                                ->helperText('Prioritize channels with a specific video codec.'),
+                            TagsInput::make('auto_merge_config.priority_keywords')
+                                ->label('Priority Keywords')
+                                ->placeholder('Add keyword...')
+                                ->helperText('Channels with these keywords in their name will be prioritized (e.g., "RAW", "LOCAL", "HD").')
+                                ->splitKeys(['Tab', 'Return']),
+                            Repeater::make('auto_merge_config.group_priorities')
+                                ->label('Group Priority Weights')
+                                ->helperText('Assign priority weights to specific groups. Higher weight = more preferred as master. Leave empty for default behavior.')
+                                ->columnSpanFull()
+                                ->columns(2)
+                                ->schema([
+                                    Select::make('group_id')
+                                        ->label('Group')
+                                        ->options(fn () => Group::query()
+                                            ->with(['playlist'])
+                                            ->where(['user_id' => auth()->id(), 'type' => 'live'])
+                                            ->get(['name', 'id', 'playlist_id'])
+                                            ->transform(fn ($group) => [
+                                                'id' => $group->id,
+                                                'name' => $group->name.' ('.$group->playlist->name.')',
+                                            ])->pluck('name', 'id')
+                                        )
+                                        ->searchable()
+                                        ->required(),
+                                    TextInput::make('weight')
+                                        ->label('Weight')
+                                        ->numeric()
+                                        ->default(100)
+                                        ->minValue(1)
+                                        ->maxValue(1000)
+                                        ->helperText('1-1000, higher = more preferred')
+                                        ->required(),
+                                ])
+                                ->reorderable()
+                                ->reorderableWithButtons()
+                                ->addActionLabel('Add group priority')
+                                ->defaultItems(0)
+                                ->dehydrateStateUsing(function ($state) {
+                                    // Store as an array of objects [{group_id: id|null, weight: weight}, ...]
+                                    if (is_array($state) && ! empty($state)) {
+                                        $formatted = [];
+                                        foreach ($state as $item) {
+                                            if (is_array($item) && isset($item['weight'])) {
+                                                $groupId = $item['group_id'] ?? null;
+                                                if (! $groupId) {
+                                                    continue;
+                                                }
+                                                $formatted[] = [
+                                                    'group_id' => $groupId,
+                                                    'weight' => (int) $item['weight'],
+                                                ];
+                                            }
+                                        }
+
+                                        return $formatted;
+                                    }
+
+                                    return [];
+                                }),
+                            Repeater::make('auto_merge_config.priority_attributes')
+                                ->label('Priority Order')
+                                ->helperText('Drag to reorder priority attributes. First attribute has highest priority. Leave empty for default order.')
+                                ->columnSpanFull()
+                                ->simple(
+                                    Select::make('attribute')
+                                        ->options([
+                                            'playlist_priority' => '📋 Playlist Priority (from failover list order)',
+                                            'group_priority' => '📁 Group Priority (from weights above)',
+                                            'catchup_support' => '⏪ Catch-up/Replay Support',
+                                            'resolution' => '📺 Resolution (requires stream analysis)',
+                                            'codec' => '🎬 Codec Preference (HEVC/H264)',
+                                            'keyword_match' => '🏷️ Keyword Match',
+                                        ])
+                                        ->required()
+                                )
+                                ->reorderable()
+                                ->reorderableWithDragAndDrop()
+                                ->distinct()
+                                ->addActionLabel('Add priority attribute')
+                                ->defaultItems(0)
+                                ->afterStateHydrated(function ($component, $state) {
+                                    // Convert stored format to repeater format (Array of config attributes)
+                                    if (is_array($state) && ! empty($state)) {
+                                        $formatted = [];
+                                        foreach ($state as $item) {
+                                            if (is_string($item)) {
+                                                $formatted[] = ['attribute' => $item];
+                                            } elseif (is_array($item) && isset($item['attribute'])) {
+                                                $formatted[] = $item;
+                                            }
+                                        }
+                                        $component->state($formatted);
+                                    }
+                                }),
+                        ]),
+                ]),
         ];
 
         $channelMatchFields = [
@@ -1572,13 +2315,18 @@ class PlaylistResource extends Resource
                 ->collapsible()
                 ->collapsed($creating)
                 ->columns(2)
+                ->hidden(fn () => ! auth()->user()->canUseProxy())
                 ->schema([
                     Toggle::make('enable_proxy')
                         ->label('Enable Stream Proxy')
                         ->hint(fn (Get $get): string => $get('enable_proxy') ? 'Proxied' : 'Not proxied')
                         ->hintIcon(fn (Get $get): string => ! $get('enable_proxy') ? 'heroicon-m-lock-open' : 'heroicon-m-lock-closed')
                         ->live()
-                        ->helperText('When enabled, all streams will be proxied through the application. This allows for better compatibility with various clients and enables features such as stream limiting and output format selection.')
+                        ->helperText(fn (Get $get): string => $get('profiles_enabled')
+                            ? 'Proxy mode is required when Provider Profiles are enabled.'
+                            : 'When enabled, all streams will be proxied through the application. This allows for better compatibility with various clients and enables features such as stream limiting and output format selection.')
+                        ->disabled(fn (Get $get): bool => (bool) $get('profiles_enabled'))
+                        ->dehydrated()
                         ->inline(false)
                         ->default(false),
                     Toggle::make('enable_logo_proxy')
@@ -1611,26 +2359,45 @@ class PlaylistResource extends Resource
                         ->default(0) // Default to 0 streams (for unlimted)
                         ->required()
                         ->hidden(fn (Get $get): bool => ! $get('enable_proxy')),
-                    TextInput::make('server_timezone')
-                        ->label('Provider Timezone')
-                        ->helperText('The portal/provider timezone (DST-aware). Needed to correctly use timeshift functionality when playlist proxy is enabled.')
-                        ->placeholder('Etc/UTC')
-                        ->hidden(fn (Get $get): bool => ! $get('enable_proxy')),
-                    Toggle::make('strict_live_ts')
-                        ->label('Enable Strict Live TS Handling')
-                        ->hintAction(
-                            Action::make('learn_more_strict_live_ts')
-                                ->label('Learn More')
-                                ->icon('heroicon-o-arrow-top-right-on-square')
-                                ->iconPosition('after')
-                                ->size('sm')
-                                ->url('https://github.com/sparkison/m3u-proxy/blob/master/docs/STRICT_LIVE_TS_MODE.md')
-                                ->openUrlInNewTab(true)
-                        )
-                        ->helperText('Enhanced stability for live MPEG-TS streams with PVR clients like Kodi and HDHomeRun (only used when not using transcoding profiles).')
-                        ->inline(false)
-                        ->default(false)
-                        ->hidden(fn (Get $get): bool => ! $get('enable_proxy')),
+
+                    Grid::make()
+                        ->columns(3)
+                        ->schema([
+                            TextInput::make('server_timezone')
+                                ->label('Provider Timezone')
+                                ->helperText('The portal/provider timezone (DST-aware). Needed to correctly use timeshift functionality when playlist proxy is enabled.')
+                                ->placeholder('Etc/UTC'),
+                            Toggle::make('strict_live_ts')
+                                ->label('Enable Strict Live TS Handling')
+                                ->hintAction(
+                                    Action::make('learn_more_strict_live_ts')
+                                        ->label('Learn More')
+                                        ->icon('heroicon-o-arrow-top-right-on-square')
+                                        ->iconPosition('after')
+                                        ->size('sm')
+                                        ->url('https://github.com/sparkison/m3u-proxy/blob/master/docs/STRICT_LIVE_TS_MODE.md')
+                                        ->openUrlInNewTab(true)
+                                )
+                                ->helperText('Enhanced stability for live MPEG-TS streams with PVR clients like Kodi and HDHomeRun (only used when not using transcoding profiles).')
+                                ->inline(false)
+                                ->default(false),
+                            Toggle::make('use_sticky_session')
+                                ->label('Enable Sticky Session Handler')
+                                ->hintAction(
+                                    Action::make('learn_more_sticky_session')
+                                        ->label('Learn More')
+                                        ->icon('heroicon-o-arrow-top-right-on-square')
+                                        ->iconPosition('after')
+                                        ->size('sm')
+                                        ->url('https://github.com/sparkison/m3u-proxy/blob/master/docs/STICKY_SESSION.md')
+                                        ->openUrlInNewTab(true)
+                                )
+                                ->helperText('')
+                                ->inline(false)
+                                ->default(false)
+                                ->helperText('Lock clients to specific backend origins after redirects to prevent playback loops when load balancers bounce between origins. Disable if your provider doesn\'t use load balancing.'),
+                        ])->hidden(fn (Get $get): bool => ! $get('enable_proxy')),
+
                     Fieldset::make('Transcoding Settings (optional)')
                         ->columnSpanFull()
                         ->schema([
@@ -1702,7 +2469,8 @@ class PlaylistResource extends Resource
                         ->helperText('How you would like to ID your channels in the EPG.')
                         ->options([
                             'stream_id' => 'TVG ID/Stream ID (default)',
-                            'channel_id' => 'Channel Number (recommended for HDHR)',
+                            'channel_id' => 'Channel ID (recommended for HDHR)',
+                            'number' => 'Channel Number',
                             'name' => 'Channel Name',
                             'title' => 'Channel Title',
                         ])
@@ -1724,6 +2492,7 @@ class PlaylistResource extends Resource
                         ->default(120)
                         ->hidden(fn (Get $get): bool => ! $get('dummy_epg')),
                 ]),
+
         ];
 
         $authFields = [

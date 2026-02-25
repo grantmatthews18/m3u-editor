@@ -33,6 +33,8 @@ class Series extends Model
         'user_id' => 'integer',
         'playlist_id' => 'integer',
         'category_id' => 'integer',
+        'tmdb_id' => 'integer',
+        'tvdb_id' => 'integer',
         // 'release_date' => 'date', // Not always well formed date, don't attempt to cast
         'rating_5based' => 'integer',
         'enabled' => 'boolean',
@@ -55,6 +57,11 @@ class Series extends Model
     public function category(): BelongsTo
     {
         return $this->belongsTo(Category::class);
+    }
+
+    public function streamFileSetting(): BelongsTo
+    {
+        return $this->belongsTo(StreamFileSetting::class);
     }
 
     public function customPlaylists(): BelongsToMany
@@ -165,7 +172,7 @@ class Series extends Model
                             'season_number' => $season,
                             'name' => $seasonInfo['name'] ?? 'Season '.str_pad($season, 2, '0', STR_PAD_LEFT),
                             'source_season_id' => $seasonInfo['id'] ?? null,
-                            'episode_count' => $seasonInfo['episode_count'] ?? 0,
+                            'episode_count' => (int) ($seasonInfo['episode_count'] ?? 0),
                             'cover' => $seasonInfo['cover'] ?? null,
                             'cover_big' => $seasonInfo['cover_big'] ?? null,
                             'user_id' => $playlist->user_id,
@@ -181,7 +188,7 @@ class Series extends Model
                             'new' => false,
                             'source_season_id' => $seasonInfo['id'] ?? null,
                             'category_id' => $playlistCategory->id,
-                            'episode_count' => $seasonInfo['episode_count'] ?? 0,
+                            'episode_count' => (int) ($seasonInfo['episode_count'] ?? 0),
                             'cover' => $seasonInfo['cover'] ?? null,
                             'cover_big' => $seasonInfo['cover_big'] ?? null,
                             'series_id' => $this->id,
@@ -231,7 +238,7 @@ class Series extends Model
                     // Upsert the episodes in bulk
                     Episode::upsert(
                         $bulk,
-                        uniqueBy: ['source_episode_id', 'playlist_id'],
+                        uniqueBy: ['source_episode_id', 'playlist_id', 'series_id'],
                         update: [
                             'title',
                             'import_batch_no',
@@ -251,7 +258,8 @@ class Series extends Model
 
                 if ($sync && $this->enabled) {
                     // Dispatch the job to sync .strm files
-                    dispatch(new SyncSeriesStrmFiles(series: $this, notify: false));
+                    dispatch(new SyncSeriesStrmFiles(series: $this, notify: false))
+                        ->afterCommit();
                 }
 
                 return $episodeCount;

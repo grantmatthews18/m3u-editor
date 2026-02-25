@@ -7,7 +7,10 @@
 
 @import "./components/tables.scss";
 @import "./components/widgets.css";
+@import "./components/logs.css";
 @import "./components/footer.css";
+
+@plugin '@tailwindcss/typography';
 
 @source '../../app/Filament';
 @source '../../resources/views/filament';
@@ -74,7 +77,7 @@
     transition: all 0.2s;
 }
 
-.fi-dropdown-panel {
-    max-height: 300px;
+/* .fi-dropdown-panel {
+    max-height: calc(100vh - 64px);
     overflow-y: auto;
-}
+} */

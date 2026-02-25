@@ -8,22 +8,30 @@ use App\Events\EpgUpdated;
 use App\Events\PlaylistCreated;
 use App\Events\PlaylistDeleted;
 use App\Events\PlaylistUpdated;
+use App\Jobs\SyncMediaServer;
 use App\Livewire\BackupDestinationListRecords;
 use App\Livewire\StreamPlayer;
 use App\Livewire\TmdbSearch;
+use App\Models\Channel;
 use App\Models\ChannelFailover;
 use App\Models\CustomPlaylist;
 use App\Models\Epg;
 use App\Models\Group;
+use App\Models\MediaServerIntegration;
 use App\Models\MergedPlaylist;
+use App\Models\Network;
 use App\Models\Playlist;
 use App\Models\PlaylistAlias;
+use App\Models\StreamFileSetting;
 use App\Models\StreamProfile;
 use App\Models\User;
 use App\Services\EpgCacheService;
 use App\Services\GitInfoService;
+use App\Services\NetworkBroadcastService;
+use App\Services\NetworkChannelSyncService;
 use App\Services\PlaylistService;
 use App\Services\ProxyService;
+use App\Services\SortService;
 use App\Settings\GeneralSettings;
 use Dedoc\Scramble\Scramble;
 use Dedoc\Scramble\Support\Generator\OpenApi;
@@ -33,6 +41,7 @@ use Filament\Support\Facades\FilamentView;
 use Filament\View\PanelsRenderHook;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Route;
 use Illuminate\Support\Facades\DB;
@@ -40,6 +49,7 @@ use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\RateLimiter;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\URL;
 use Illuminate\Support\HtmlString;
@@ -57,6 +67,20 @@ class AppServiceProvider extends ServiceProvider
     public function register(): void
     {
         $this->app->singleton(GitInfoService::class);
+
+        // Register Artisan commands for HLS maintenance
+        if ($this->app->runningInConsole()) {
+            // Ensure command class file is loaded in environments without composer dump-autoload
+            $ensurePath = __DIR__.'/../Console/Commands/NetworkBroadcastEnsure.php';
+            if (file_exists($ensurePath)) {
+                require_once $ensurePath;
+            }
+
+            $this->commands([
+                \App\Console\Commands\NetworkBroadcastHeal::class,
+                \App\Console\Commands\NetworkBroadcastEnsure::class,
+            ]);
+        }
     }
 
     /**
@@ -147,7 +171,7 @@ class AppServiceProvider extends ServiceProvider
      * Configure a sensible base URL for console/CLI contexts where there is
      * no incoming HTTP request. This ensures that route() and url() include
      * the correct host and port when generating absolute URLs (e.g. for
-     * Schedules Direct artwork proxies written into EPG files).
+     * SchedulesDirect artwork proxies written into EPG files).
      */
     private function configureConsoleBaseUrl(): void
     {
@@ -254,6 +278,13 @@ class AppServiceProvider extends ServiceProvider
                     continue;
                 }
 
+                // For the jobs database, ensure the schema exists
+                // This handles cases where the jobs.sqlite file gets deleted/corrupted
+                // since migrations are tracked in the main database.sqlite
+                if ($connection === 'jobs') {
+                    $this->ensureJobsTableExists();
+                }
+
                 // Set SQLite pragmas
                 DB::connection($connection)
                     ->statement('
@@ -270,6 +301,36 @@ class AppServiceProvider extends ServiceProvider
         } catch (Throwable $throwable) {
             // Log the error
             Log::error('Error setting SQLite pragmas: '.$throwable->getMessage());
+        }
+    }
+
+    /**
+     * Ensure the jobs table exists in the jobs database.
+     *
+     * This is necessary because the jobs.sqlite database is separate from the main
+     * database, but migrations are tracked in the main database. If the jobs.sqlite
+     * file gets deleted or corrupted, the migration won't run again automatically.
+     *
+     * This method creates the table schema directly if it doesn't exist, ensuring
+     * the application can always write to the jobs table.
+     */
+    private function ensureJobsTableExists(): void
+    {
+        try {
+            if (! Schema::connection('jobs')->hasTable('jobs')) {
+                Schema::connection('jobs')->create('jobs', function (Blueprint $table) {
+                    $table->id();
+                    $table->string('title');
+                    $table->string('batch_no');
+                    $table->longText('payload');
+                    $table->json('variables')->nullable();
+                    $table->timestamps();
+                });
+
+                Log::info('Created jobs table in jobs.sqlite database');
+            }
+        } catch (Throwable $e) {
+            Log::error('Failed to create jobs table: '.$e->getMessage());
         }
     }
 
@@ -374,7 +435,7 @@ class AppServiceProvider extends ServiceProvider
                     $epg->user_id = auth()->id();
                 }
                 if (! $epg->sync_interval) {
-                    $epg->sync_interval = '0 0 * * *';
+                    $epg->sync_interval = '0 */6 * * *';
                 }
                 $epg->uuid = Str::orderedUuid()->toString();
 
@@ -382,7 +443,7 @@ class AppServiceProvider extends ServiceProvider
             });
             Epg::updating(function (Epg $epg) {
                 if (! $epg->sync_interval) {
-                    $epg->sync_interval = '0 0 * * *';
+                    $epg->sync_interval = '0 */6 * * *';
                 }
 
                 return $epg;
@@ -545,6 +606,55 @@ class AppServiceProvider extends ServiceProvider
 
                 return $streamProfile;
             });
+
+            // MediaServerIntegration
+            MediaServerIntegration::created(function (MediaServerIntegration $integration) {
+                // Dispatch initial sync job
+                dispatch(new SyncMediaServer($integration->id));
+
+                return $integration;
+            });
+            MediaServerIntegration::deleting(function (MediaServerIntegration $integration) {
+                // Remove any associated Playlists
+                $integration->playlist()->delete();
+
+                return $integration;
+            });
+
+            // Network
+            Network::creating(function (Network $network) {
+                if (empty($network->uuid)) {
+                    $network->uuid = Str::uuid()->toString();
+                }
+            });
+            Network::updated(function (Network $network) {
+                app(NetworkChannelSyncService::class)->refreshNetworkChannel($network);
+            });
+            Network::deleting(function (Network $network) {
+                // Ensure any running broadcast is stopped and HLS files are removed
+                try {
+                    app(NetworkBroadcastService::class)->stop($network);
+                } catch (Throwable $e) {
+                    Log::warning('Failed to stop network broadcast during deletion', [
+                        'network_id' => $network->id,
+                        'error' => $e->getMessage(),
+                    ]);
+                }
+
+                Channel::where('network_id', $network->id)->delete();
+            });
+
+            // StreamFileSetting
+            StreamFileSetting::creating(function (StreamFileSetting $setting) {
+                if (! $setting->user_id) {
+                    $setting->user_id = auth()->id();
+                }
+
+                return $setting;
+            });
+
+            // ...
+
         } catch (Throwable $e) {
             // Log the error
             report($e);
@@ -595,6 +705,7 @@ class AppServiceProvider extends ServiceProvider
                     'epg/',
                     'user/',
                     'channel/',
+                    'proxy/',
                     'player_api.php',
                 ]);
             })
@@ -618,6 +729,11 @@ class AppServiceProvider extends ServiceProvider
         // Register the playlist url service
         $this->app->singleton('playlist', function () {
             return new PlaylistService;
+        });
+
+        // Register the sort service
+        $this->app->singleton('sort', function () {
+            return new SortService;
         });
     }
 

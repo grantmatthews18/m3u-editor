@@ -685,6 +685,7 @@ class StrmFileMapping extends Model
         $batchSize = 500;
 
         // Ensure chunkById uses the fully-qualified column name to avoid ambiguous "id" when joined
+        // Pass both column (for WHERE clause) and alias (for accessing value from result)
         $baseQuery->orderBy('strm_file_mappings.id')
             ->chunkById($batchSize, function ($rows) use (&$idsToDelete, &$pathsToUnlink, &$count, $batchSize) {
                 foreach ($rows as $row) {
@@ -722,7 +723,7 @@ class StrmFileMapping extends Model
                     $idsToDelete = [];
                     $pathsToUnlink = [];
                 }
-            }, 'strm_file_mappings.id');
+            }, 'strm_file_mappings.id', 'id');
 
         // Final flush of remaining ids/paths
         if (! empty($pathsToUnlink)) {
@@ -823,6 +824,36 @@ class StrmFileMapping extends Model
         } finally {
             closedir($handle);
         }
+    }
+
+    /**
+     * Convert a .strm file path to its corresponding .nfo path.
+     *
+     * Rules:
+     * - If a path ends with a slash or is a directory, return "<dir>/tvshow.nfo".
+     * - If a file path ends with ".strm" (case-insensitive), replace it with ".nfo".
+     * - If the path already ends with ".nfo", return it unchanged.
+     * - Otherwise append ".nfo" to the path.
+     */
+    public static function strmPathToNfoPath(string $path): string
+    {
+        // Directory path -> tvshow.nfo
+        if (str_ends_with($path, '/') || is_dir($path)) {
+            return rtrim($path, '/').'/'.self::TVSHOW_NFO_FILENAME;
+        }
+
+        // Already .nfo -> return as-is
+        if (preg_match('/\.nfo$/i', $path)) {
+            return $path;
+        }
+
+        // Replace .strm with .nfo (case-insensitive)
+        if (preg_match('/\.strm$/i', $path)) {
+            return preg_replace('/\.strm$/i', self::NFO_EXTENSION, $path);
+        }
+
+        // Fallback: append .nfo
+        return $path.self::NFO_EXTENSION;
     }
 
     /**

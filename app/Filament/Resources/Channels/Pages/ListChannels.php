@@ -9,16 +9,14 @@ use App\Filament\Resources\EpgMaps\EpgMapResource;
 use App\Jobs\ChannelFindAndReplace;
 use App\Jobs\ChannelFindAndReplaceReset;
 use App\Jobs\MapPlaylistChannelsToEpg;
-use App\Jobs\MergeChannels;
-use App\Jobs\UnmergeChannels;
 use App\Models\Channel;
 use App\Models\Playlist;
+use App\Services\PlaylistService;
 use Filament\Actions\Action;
 use Filament\Actions\ActionGroup;
 use Filament\Actions\CreateAction;
 use Filament\Actions\ExportAction;
 use Filament\Actions\ImportAction;
-use Filament\Forms\Components\Repeater;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\TextInput;
 use Filament\Forms\Components\Toggle;
@@ -59,95 +57,22 @@ class ListChannels extends ListRecords
                 ))
                 ->slideOver(),
             ActionGroup::make([
-                Action::make('merge')
-                    ->label('Merge Same ID')
-                    ->schema([
-                        Select::make('playlist_id')
-                            ->required()
-                            ->label('Preferred Playlist')
-                            ->options(Playlist::where('user_id', auth()->id())->pluck('name', 'id'))
-                            ->live()
-                            ->searchable()
-                            ->helperText('Select a playlist to prioritize as the master during the merge process.'),
-                        Repeater::make('failover_playlists')
-                            ->label('')
-                            ->helperText('Select one or more playlists use as failover source(s).')
-                            ->reorderable()
-                            ->reorderableWithButtons()
-                            ->orderColumn('sort')
-                            ->simple(
-                                Select::make('playlist_failover_id')
-                                    ->label('Failover Playlists')
-                                    ->options(Playlist::where('user_id', auth()->id())->pluck('name', 'id'))
-                                    ->searchable()
-                                    ->required()
-                            )
-                            ->distinct()
-                            ->columns(1)
-                            ->addActionLabel('Add failover playlist')
-                            ->columnSpanFull()
-                            ->minItems(1)
-                            ->defaultItems(1),
-                        Toggle::make('by_resolution')
-                            ->label('Order by Resolution')
-                            ->live()
-                            ->helperText('⚠️ IPTV WARNING: This will analyze each stream to determine resolution, which may cause rate limiting or blocking with IPTV providers. Only enable if your provider allows stream analysis.')
-                            ->default(false),
-                        Toggle::make('deactivate_failover_channels')
-                            ->label('Deactivate Failover Channels')
-                            ->helperText('When enabled, channels that become failovers will be automatically disabled.')
-                            ->default(false),
-                    ])
-                    ->action(function (array $data): void {
-                        app('Illuminate\Contracts\Bus\Dispatcher')
-                            ->dispatch(new MergeChannels(
-                                user: auth()->user(),
-                                playlists: collect($data['failover_playlists']),
-                                playlistId: $data['playlist_id'],
-                                checkResolution: $data['by_resolution'] ?? false, // Sort failovers by resolution, or by playlist (default behavior)
-                                deactivateFailoverChannels: $data['deactivate_failover_channels'] ?? false,
-                            ));
-                    })->after(function () {
+                PlaylistService::getMergeAction()
+                    ->after(function () {
                         Notification::make()
                             ->success()
                             ->title('Channel merge started')
                             ->body('Merging channels in the background. You will be notified once the process is complete.')
                             ->send();
-                    })
-                    ->requiresConfirmation()
-                    ->icon('heroicon-o-arrows-pointing-in')
-                    ->modalIcon('heroicon-o-arrows-pointing-in')
-                    ->modalDescription('Merge all channels with the same ID into a single channel with failover.')
-                    ->modalSubmitActionLabel('Merge now'),
-                Action::make('unmerge')
-                    ->schema([
-                        Select::make('playlist_id')
-                            ->label('Unmerge Playlist')
-                            ->options(Playlist::where('user_id', auth()->id())->pluck('name', 'id'))
-                            ->live()
-                            ->searchable()
-                            ->helperText('Playlist to unmerge channels from (or leave empty to unmerge all).'),
-                    ])
-                    ->label('Unmerge Same ID')
-                    ->action(function ($data): void {
-                        app('Illuminate\Contracts\Bus\Dispatcher')
-                            ->dispatch(new UnmergeChannels(
-                                user: auth()->user(),
-                                playlistId: $data['playlist_id'] ?? null
-                            ));
-                    })->after(function () {
+                    }),
+                PlaylistService::getUnmergeAction()
+                    ->after(function () {
                         Notification::make()
                             ->success()
                             ->title('Channel unmerge started')
                             ->body('Unmerging channels in the background. You will be notified once the process is complete.')
                             ->send();
-                    })
-                    ->requiresConfirmation()
-                    ->icon('heroicon-o-arrows-pointing-out')
-                    ->color('warning')
-                    ->modalIcon('heroicon-o-arrows-pointing-out')
-                    ->modalDescription('Unmerge all channels with the same ID, removing all failover relationships.')
-                    ->modalSubmitActionLabel('Unmerge now'),
+                    }),
                 Action::make('map')
                     ->label('Map EPG to Playlist')
                     ->schema(EpgMapResource::getForm())
@@ -174,7 +99,33 @@ class ListChannels extends ListRecords
                     ->modalWidth(Width::FourExtraLarge)
                     ->modalDescription('Map the selected EPG to the selected Playlist channels.')
                     ->modalSubmitActionLabel('Map now'),
-
+                Action::make('unmap')
+                    ->label('Undo EPG Map')
+                    ->schema([
+                        Select::make('playlist_id')
+                            ->label('Playlist')
+                            ->options(Playlist::where('user_id', auth()->id())->pluck('name', 'id'))
+                            ->live()
+                            ->required()
+                            ->searchable()
+                            ->helperText(text: 'Playlist to clear EPG mappings for.'),
+                    ])
+                    ->action(function (array $data): void {
+                        $playlist = Playlist::find($data['playlist_id']);
+                        $playlist->live_channels()->update(['epg_channel_id' => null]);
+                    })->after(function () {
+                        Notification::make()
+                            ->success()
+                            ->title('EPG Channel mapping removed')
+                            ->body('Channel mapping removed for the selected Playlist.')
+                            ->send();
+                    })
+                    ->requiresConfirmation()
+                    ->icon('heroicon-o-arrow-uturn-left')
+                    ->color('warning')
+                    ->modalIcon('heroicon-o-arrow-uturn-left')
+                    ->modalDescription('Clear EPG mappings for all channels of the selected playlist.')
+                    ->modalSubmitActionLabel('Reset now'),
                 Action::make('find-replace')
                     ->label('Find & Replace')
                     ->schema([

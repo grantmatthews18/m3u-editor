@@ -7,6 +7,7 @@ use App\Enums\PlaylistChannelId;
 use App\Facades\PlaylistFacade;
 use App\Http\Controllers\Controller;
 use App\Http\Controllers\LogoProxyController;
+use App\Http\Controllers\PlaylistGenerateController;
 use App\Models\Epg;
 use App\Models\Playlist;
 use App\Models\StreamProfile;
@@ -166,6 +167,11 @@ class EpgApiController extends Controller
             return response()->json(['Error' => 'Playlist Not Found'], 404);
         }
 
+        // Handle network playlists - they have networks with programmes instead of channels with EPG
+        if ($playlist instanceof \App\Models\Playlist && $playlist->is_network_playlist) {
+            return $this->getDataForNetworkPlaylist($playlist, $request);
+        }
+
         $cacheService = new EpgCacheService;
 
         // Pagination parameters
@@ -191,17 +197,7 @@ class EpgApiController extends Controller
         ]);
         try {
             // Get enabled channels from the playlist
-            $playlistChannels = $playlist->channels()
-                ->leftJoin('groups', 'channels.group_id', '=', 'groups.id')
-                ->where('channels.enabled', true)
-                ->when(! $vod, function ($query) {
-                    return $query->where('channels.is_vod', false);
-                })
-                ->with(['epgChannel', 'tags', 'group'])
-                ->orderBy('groups.sort_order') // Primary sort
-                ->orderBy('channels.sort') // Secondary sort
-                ->orderBy('channels.channel')
-                ->orderBy('channels.title')
+            $playlistChannels = PlaylistGenerateController::getChannelQuery($playlist)
                 ->when($search, function ($queryBuilder) use ($search) {
                     $search = Str::lower($search);
 
@@ -214,8 +210,7 @@ class EpgApiController extends Controller
                 })
                 ->limit($perPage)
                 ->offset($skip)
-                ->select('channels.*')
-                ->get();
+                ->cursor();
 
             // Get the stream profile to use for the floating player
             // Prefer playlist profiles over globals
@@ -249,13 +244,16 @@ class EpgApiController extends Controller
             $playlistChannelData = [];
             $channelSortIndex = $skip;
             foreach ($playlistChannels as $channel) {
-                $epgData = $channel->epgChannel ?? null;
+                $epgId = $channel->epg_id ?? null;
                 $channelNo = $channel->channel;
-                if (! $channelNo) {
+                if (! $channelNo && ($playlist->auto_channel_increment || $idChannelBy === PlaylistChannelId::Number)) {
                     $channelNo = ++$channelNumber;
                 }
-                if ($epgData) {
-                    $epgId = $epgData->epg_id;
+
+                // Ensure we always have a unique identifier for the channel
+                // Use database ID as fallback if channel number is not set
+                $channelKey = $channelNo ?: $channel->id;
+                if ($epgId) {
                     $epgIds[] = $epgId;
                     if (! isset($epgChannelMap[$epgId])) {
                         $epgChannelMap[$epgId] = [];
@@ -263,16 +261,16 @@ class EpgApiController extends Controller
 
                     // Map EPG channel ID to playlist channel info
                     // Store array of playlist channels for each EPG channel (one-to-many mapping)
-                    if (! isset($epgChannelMap[$epgId][$epgData->channel_id])) {
-                        $epgChannelMap[$epgId][$epgData->channel_id] = [];
+                    if (! isset($epgChannelMap[$epgId][$channel->epg_channel_key])) {
+                        $epgChannelMap[$epgId][$channel->epg_channel_key] = [];
                     }
 
                     $logo = url('/placeholder.png');
                     if ($channel->logo) {
                         // Logo override takes precedence
                         $logo = $channel->logo;
-                    } elseif ($channel->logo_type === ChannelLogoType::Epg && $channel->epgChannel && $channel->epgChannel->icon) {
-                        $logo = $channel->epgChannel->icon;
+                    } elseif ($channel->logo_type === ChannelLogoType::Epg && ($channel->epg_icon || $channel->epg_icon_custom)) {
+                        $logo = $channel->epg_icon_custom ?? $channel->epg_icon ?? '';
                     } elseif ($channel->logo_type === ChannelLogoType::Channel && ($channel->logo || $channel->logo_internal)) {
                         $logo = $channel->logo ?? $channel->logo_internal ?? '';
                         $logo = filter_var($logo, FILTER_VALIDATE_URL) ? $logo : url('/placeholder.png');
@@ -282,11 +280,11 @@ class EpgApiController extends Controller
                     }
 
                     // Add the playlist channel info to the EPG channel map
-                    $epgChannelMap[$epgId][$epgData->channel_id][] = [
-                        'playlist_channel_id' => $channelNo,
+                    $epgChannelMap[$epgId][$channel->epg_channel_key][] = [
+                        'playlist_channel_id' => $channelKey,
                         'display_name' => $channel->title_custom ?? $channel->title,
                         'title' => $channel->name_custom ?? $channel->name,
-                        'channel_number' => $channel->channel,
+                        'channel_number' => $channelNo,
                         'group' => $channel->group ?? $channel->group_internal,
                         'logo' => $logo ?? '',
                     ];
@@ -303,11 +301,11 @@ class EpgApiController extends Controller
 
                     // Keep track of which channels need a dummy EPG program
                     $dummyEpgChannels[] = [
-                        'playlist_channel_id' => $channelNo,
+                        'playlist_channel_id' => $channelKey,
                         'display_name' => $channel->title_custom ?? $channel->title,
                         'title' => $channel->name_custom ?? $channel->name,
                         'icon' => $icon,
-                        'channel_number' => $channel->channel,
+                        'channel_number' => $channelNo,
                         'group' => $channel->group ?? $channel->group_internal,
                         'include_category' => $playlist->dummy_epg_category,
                     ];
@@ -316,7 +314,10 @@ class EpgApiController extends Controller
                 // Get the TVG ID
                 switch ($idChannelBy) {
                     case PlaylistChannelId::ChannelId:
-                        $tvgId = $channel->source_id ?? $channel->id;
+                        $tvgId = $channel->id;
+                        break;
+                    case PlaylistChannelId::Number:
+                        $tvgId = $channelNumber;
                         break;
                     case PlaylistChannelId::Name:
                         $tvgId = $channel->name_custom ?? $channel->name;
@@ -325,7 +326,7 @@ class EpgApiController extends Controller
                         $tvgId = $channel->title_custom ?? $channel->title;
                         break;
                     default:
-                        $tvgId = $channel->stream_id_custom ?? $channel->stream_id;
+                        $tvgId = $channel->source_id ?? $channel->stream_id_custom ?? $channel->stream_id;
                         break;
                 }
 
@@ -361,8 +362,8 @@ class EpgApiController extends Controller
                 if ($logoProxyEnabled) {
                     $icon = LogoProxyController::generateProxyUrl($icon, internal: true);
                 }
-                $playlistChannelData[$channelNo] = [
-                    'id' => $channelNo,
+                $playlistChannelData[$channelKey] = [
+                    'id' => $channelKey,
                     'database_id' => $channel->id, // Add the actual database ID for editing
                     'url' => $url,
                     'format' => $channel->is_vod
@@ -371,11 +372,11 @@ class EpgApiController extends Controller
                     'tvg_id' => $tvgId,
                     'display_name' => $channel->title_custom ?? $channel->title,
                     'title' => $channel->name_custom ?? $channel->name,
-                    'channel_number' => $channel->channel,
+                    'channel_number' => $channelNo,
                     'group' => $channel->group ?? $channel->group_internal,
                     'icon' => $icon,
-                    'has_epg' => $epgData !== null,
-                    'epg_channel_id' => $epgData->channel_id ?? null,
+                    'has_epg' => $epgId !== null,
+                    'epg_channel_id' => $channel->epg_channel_id ?? null,
                     'tvg_shift' => (int) ($channel->tvg_shift ?? 0), // EPG time shift in hours
                     'sort_index' => $channelSortIndex++,
                 ];
@@ -582,6 +583,173 @@ class EpgApiController extends Controller
             ]);
         } catch (Exception $e) {
             Log::error("Error retrieving EPG data for playlist {$playlist->name}: {$e->getMessage()}");
+
+            return response()->json([
+                'error' => 'Failed to retrieve EPG data: '.$e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Get EPG data for a network playlist.
+     * Networks act as channels, and their programmes provide the EPG schedule.
+     */
+    private function getDataForNetworkPlaylist(\App\Models\Playlist $playlist, Request $request)
+    {
+        // Pagination parameters
+        $page = (int) $request->get('page', 1);
+        $perPage = (int) $request->get('per_page', 50);
+        $skip = max(0, ($page - 1) * $perPage);
+        $search = $request->get('search', null);
+
+        // Get parsed date range
+        $dateRange = $this->parseDateRange($request);
+        $startDate = $dateRange['start'];
+        $endDate = $dateRange['end'];
+
+        Log::debug('EPG API Request for Network Playlist', [
+            'playlist_uuid' => $playlist->uuid,
+            'playlist_name' => $playlist->name,
+            'page' => $page,
+            'per_page' => $perPage,
+            'start_date' => $startDate,
+            'end_date' => $endDate,
+        ]);
+
+        try {
+            // Get enabled networks that output to this playlist
+            $networksQuery = $playlist->networks()
+                ->where('enabled', true)
+                ->when($search, function ($query) use ($search) {
+                    $search = Str::lower($search);
+
+                    return $query->whereRaw('LOWER(name) LIKE ?', ['%'.$search.'%']);
+                })
+                ->orderBy('channel_number')
+                ->orderBy('name');
+
+            $totalChannels = $networksQuery->count();
+            $networks = $networksQuery->skip($skip)->take($perPage)->get();
+
+            // Build channel data from networks
+            $channels = [];
+            $programmes = [];
+
+            foreach ($networks as $network) {
+                $channelNo = $network->channel_number ?? $network->id;
+
+                // Get the stream URL - use HLS if broadcasting, otherwise legacy endpoint
+                $url = $network->stream_url;
+
+                // Get network logo or placeholder
+                $icon = $network->logo ?? url('/placeholder.png');
+
+                // Calculate broadcast offset for EPG playhead alignment
+                $broadcastOffset = null;
+                if ($network->isBroadcasting() && $network->broadcast_started_at) {
+                    // Calculate how many seconds the broadcast has been running
+                    $broadcastElapsed = (int) $network->broadcast_started_at->diffInSeconds(now());
+                    // The actual media position is initial_offset + time since broadcast started
+                    $actualMediaPosition = ($network->broadcast_initial_offset ?? 0) + $broadcastElapsed;
+
+                    $broadcastOffset = [
+                        'started_at' => $network->broadcast_started_at->toIso8601String(),
+                        'initial_offset' => $network->broadcast_initial_offset ?? 0,
+                        'broadcast_elapsed' => $broadcastElapsed,
+                        'actual_media_position' => $actualMediaPosition,
+                    ];
+                }
+
+                // Build channel entry
+                $channels[$channelNo] = [
+                    'id' => $channelNo,
+                    'database_id' => null, // $network->id,
+                    'url' => $url,
+                    'format' => 'hls', // Network streams are HLS
+                    'tvg_id' => 'network_'.$network->id,
+                    'display_name' => $network->name,
+                    'title' => $network->name,
+                    'channel_number' => $network->channel_number ?? $channelNo,
+                    'group' => 'Networks',
+                    'icon' => $icon,
+                    'has_epg' => true, // Networks always have EPG from programmes
+                    'epg_channel_id' => 'network_'.$network->id,
+                    'tvg_shift' => 0,
+                    'sort_index' => $channelNo,
+                    'is_network' => true, // Flag to identify network channels
+                    'is_broadcasting' => $network->isBroadcasting(),
+                    'broadcast_offset' => $broadcastOffset, // For EPG playhead alignment
+                ];
+
+                // Get programmes for this network within the date range
+                $startDateTime = Carbon::parse($startDate)->startOfDay();
+                $endDateTime = Carbon::parse($endDate)->endOfDay();
+
+                $networkProgrammes = $network->programmes()
+                    ->where('end_time', '>=', $startDateTime)
+                    ->where('start_time', '<=', $endDateTime)
+                    ->orderBy('start_time')
+                    ->get();
+
+                // Convert to EPG programme format
+                $channelProgrammes = [];
+                foreach ($networkProgrammes as $programme) {
+                    $content = $programme->contentable;
+                    $title = $content?->title ?? $content?->name ?? 'Unknown Program';
+                    $desc = $content?->overview ?? $content?->description ?? '';
+
+                    // Get content icon if available
+                    $programmeIcon = null;
+                    if ($content) {
+                        $programmeIcon = $content->poster ?? $content->logo ?? null;
+                    }
+
+                    $channelProgrammes[] = [
+                        'start' => $programme->start_time->toIso8601String(),
+                        'stop' => $programme->end_time->toIso8601String(),
+                        'title' => $title,
+                        'desc' => $desc,
+                        'icon' => $programmeIcon,
+                        'category' => 'Network Content',
+                    ];
+                }
+
+                $programmes[$channelNo] = $channelProgrammes;
+            }
+
+            // Create pagination info
+            $pagination = [
+                'current_page' => $page,
+                'per_page' => $perPage,
+                'total_channels' => $totalChannels,
+                'returned_channels' => count($channels),
+                'has_more' => ($skip + $perPage) < $totalChannels,
+                'next_page' => ($skip + $perPage) < $totalChannels ? $page + 1 : null,
+            ];
+
+            return response()->json([
+                'playlist' => [
+                    'id' => $playlist->id,
+                    'name' => $playlist->name,
+                    'uuid' => $playlist->uuid,
+                    'type' => get_class($playlist),
+                    'is_network_playlist' => true,
+                ],
+                'date_range' => [
+                    'start' => $startDate,
+                    'end' => $endDate,
+                ],
+                'pagination' => $pagination,
+                'channels' => $channels,
+                'programmes' => $programmes,
+                'cache_info' => [
+                    'cached' => false, // Network programmes are fetched live
+                    'epg_count' => 0,
+                    'channels_with_epg' => count($channels), // All networks have EPG
+                ],
+            ]);
+        } catch (Exception $e) {
+            Log::error("Error retrieving EPG data for network playlist {$playlist->name}: {$e->getMessage()}");
 
             return response()->json([
                 'error' => 'Failed to retrieve EPG data: '.$e->getMessage(),

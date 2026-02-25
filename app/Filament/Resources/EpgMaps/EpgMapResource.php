@@ -29,6 +29,7 @@ use Filament\Tables\Columns\TextColumn;
 use Filament\Tables\Columns\ToggleColumn;
 use Filament\Tables\Enums\RecordActionsPosition;
 use Filament\Tables\Table;
+use Illuminate\Support\Facades\Auth;
 use RyanChandler\FilamentProgressColumn\ProgressColumn;
 
 class EpgMapResource extends Resource
@@ -247,14 +248,14 @@ class EpgMapResource extends Resource
                 ->required()
                 ->label('EPG')
                 ->helperText('Select the EPG you would like to map from.')
-                ->options(Epg::where(['user_id' => auth()->id()])->get(['name', 'id'])->pluck('name', 'id'))
+                ->options(Epg::where(['user_id' => Auth::id(), 'is_merged' => false])->get(['name', 'id'])->pluck('name', 'id'))
                 ->hidden(! $showEpg)
                 ->searchable(),
             Select::make('playlist_id')
                 ->required()
                 ->label('Playlist')
                 ->helperText('Select the playlist you would like to map to.')
-                ->options(Playlist::where(['user_id' => auth()->id()])->get(['name', 'id'])->pluck('name', 'id'))
+                ->options(Playlist::where(['user_id' => Auth::id()])->get(['name', 'id'])->pluck('name', 'id'))
                 ->hidden(! $showPlaylist)
                 ->searchable(),
             Toggle::make('override')
@@ -269,6 +270,13 @@ class EpgMapResource extends Resource
                 ->columns(2)
                 ->columnSpanFull()
                 ->schema([
+                    Toggle::make('settings.skip_missing')
+                        ->label('Skip channels without EPG ID')
+                        ->columnSpanFull()
+                        ->inline(true)
+                        ->live()
+                        ->default(false)
+                        ->helperText('When enabled, channels that do not have "epg_channel_id" or "tvg-id" will be skipped during the mapping process. Disable this to attempt to match all channels, even those without an EPG ID.'),
                     Toggle::make('settings.use_regex')
                         ->label('Use regex for filtering')
                         ->columnSpanFull()

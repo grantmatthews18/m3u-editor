@@ -23,9 +23,10 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      proxy_commit: ${{ steps.proxy.outputs.commit }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Determine version
         id: version
@@ -40,6 +41,17 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Building version: $VERSION"
 
+      - name: Get m3u-proxy latest commit
+        id: proxy
+        run: |
+          PROXY_COMMIT=$(git ls-remote https://github.com/${{ github.repository_owner }}/m3u-proxy.git refs/heads/master | cut -f1)
+          if [ -z "$PROXY_COMMIT" ]; then
+            echo "::warning::Could not fetch m3u-proxy commit, using timestamp for cache bust"
+            PROXY_COMMIT=$(date +%s)
+          fi
+          echo "commit=$PROXY_COMMIT" >> $GITHUB_OUTPUT
+          echo "📦 m3u-proxy commit: $PROXY_COMMIT"
+
   release-amd64:
     name: Build & Push (amd64)
     runs-on: ubuntu-latest
@@ -48,7 +60,7 @@ jobs:
       digest: ${{ steps.build.outputs.digest }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -78,9 +90,12 @@ jobs:
           tags: ${{ steps.meta-amd64.outputs.tags }}
           labels: ${{ steps.meta-amd64.outputs.labels }}
           build-args: |
-            GIT_BRANCH=${{ github.ref_name }}
+            GIT_BRANCH=master
             GIT_COMMIT=${{ github.sha }}
             GIT_TAG=${{ github.ref_type == 'tag' && github.ref_name || '' }}
+            M3U_PROXY_REPO=https://github.com/${{ github.repository_owner }}/m3u-proxy.git
+            M3U_PROXY_BRANCH=master
+            M3U_PROXY_COMMIT=${{ needs.validate.outputs.proxy_commit }}
           cache-from: type=gha,scope=release-amd64
           cache-to: type=gha,mode=max,scope=release-amd64
           provenance: false
@@ -94,7 +109,7 @@ jobs:
       digest: ${{ steps.build.outputs.digest }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -124,9 +139,12 @@ jobs:
           tags: ${{ steps.meta-arm64.outputs.tags }}
           labels: ${{ steps.meta-arm64.outputs.labels }}
           build-args: |
-            GIT_BRANCH=${{ github.ref_name }}
+            GIT_BRANCH=master
             GIT_COMMIT=${{ github.sha }}
             GIT_TAG=${{ github.ref_type == 'tag' && github.ref_name || '' }}
+            M3U_PROXY_REPO=https://github.com/${{ github.repository_owner }}/m3u-proxy.git
+            M3U_PROXY_BRANCH=master
+            M3U_PROXY_COMMIT=${{ needs.validate.outputs.proxy_commit }}
           cache-from: type=gha,scope=release-arm64
           cache-to: type=gha,mode=max,scope=release-arm64
           provenance: false

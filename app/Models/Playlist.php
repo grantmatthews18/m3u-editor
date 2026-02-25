@@ -6,7 +6,7 @@ use App\Enums\ChannelMatchStrategy;
 use App\Enums\PlaylistChannelId;
 use App\Enums\PlaylistSourceType;
 use App\Enums\Status;
-use App\Services\XtreamService;
+use App\Jobs\UpdateXtreamStats;
 use App\Traits\ShortUrlTrait;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -16,7 +16,6 @@ use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\MorphToMany;
 use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\Log;
 
 class Playlist extends Model
 {
@@ -57,9 +56,16 @@ class Playlist extends Model
         'emby_config' => 'array',
         'custom_headers' => 'array',
         'strict_live_ts' => 'boolean',
+        'use_sticky_session' => 'boolean',
+        'profiles_enabled' => 'boolean',
+        'is_network_playlist' => 'boolean',
         'status' => Status::class,
         'id_channel_by' => PlaylistChannelId::class,
         'source_type' => PlaylistSourceType::class,
+        'enable_channels' => 'boolean',
+        'enable_series' => 'boolean',
+        'auto_retry_503_count' => 'integer',
+        'auto_retry_503_last_at' => 'datetime',
     ];
 
     /**
@@ -123,6 +129,45 @@ class Playlist extends Model
         return $this->belongsTo(User::class);
     }
 
+    /**
+     * Get the media server integration that owns this playlist (if any).
+     */
+    public function mediaServerIntegration(): \Illuminate\Database\Eloquent\Relations\HasOne
+    {
+        return $this->hasOne(MediaServerIntegration::class);
+    }
+
+    /**
+     * Check if this playlist belongs to a media server integration.
+     */
+    public function isMediaServerPlaylist(): bool
+    {
+        return $this->mediaServerIntegration()->exists();
+    }
+
+    /**
+     * Get networks associated with this playlist's media server integration.
+     */
+    public function getNetworks(): \Illuminate\Database\Eloquent\Collection
+    {
+        $integration = $this->mediaServerIntegration;
+        if (! $integration) {
+            // Fallback: get user's networks not linked to any specific integration
+            return Network::where('user_id', $this->user_id)
+                ->whereNull('media_server_integration_id')
+                ->where('enabled', true)
+                ->orderBy('channel_number')
+                ->orderBy('name')
+                ->get();
+        }
+
+        return $integration->networks()
+            ->where('enabled', true)
+            ->orderBy('channel_number')
+            ->orderBy('name')
+            ->get();
+    }
+
     public function streamProfile(): BelongsTo
     {
         return $this->belongsTo(StreamProfile::class, 'stream_profile_id');
@@ -136,6 +181,14 @@ class Playlist extends Model
     public function channels(): HasMany
     {
         return $this->hasMany(Channel::class);
+    }
+
+    /**
+     * Get networks that output to this playlist (for network playlists).
+     */
+    public function networks(): HasMany
+    {
+        return $this->hasMany(Network::class, 'network_playlist_id');
     }
 
     public function enabled_channels(): HasMany
@@ -259,6 +312,21 @@ class Playlist extends Model
         return $this->aliases()->where('enabled', true)->orderBy('priority');
     }
 
+    public function profiles(): HasMany
+    {
+        return $this->hasMany(PlaylistProfile::class);
+    }
+
+    public function enabledProfiles(): HasMany
+    {
+        return $this->profiles()->where('enabled', true)->orderBy('priority');
+    }
+
+    public function primaryProfile(): ?PlaylistProfile
+    {
+        return $this->profiles()->where('is_primary', true)->first();
+    }
+
     public function getAllConfigs(): array
     {
         $configs = [];
@@ -288,35 +356,41 @@ class Playlist extends Model
         return collect($configs)->sortBy('priority')->values()->all();
     }
 
+    public function enableProxy(): Attribute
+    {
+        return Attribute::make(
+            get: function ($value) {
+                if ($value) {
+                    // Check playlist user has access to proxy features
+                    if (! $this->user?->canUseProxy()) {
+                        return false;
+                    }
+                }
+
+                return $value;
+            }
+        );
+    }
+
     public function xtreamStatus(): Attribute
     {
         return Attribute::make(
             get: function ($value, $attributes) {
-                $results = $value;
-                $key = "playlist:{$attributes['id']}:xtream_status";
-                if ($this->xtream) {
-                    // This value is live, cache for 5s at a time, then fetch again
-                    try {
-                        $xtream = XtreamService::make(xtream_config: $this->xtream_config);
-                        if ($xtream) {
-                            $results = Cache::remember(
-                                $key,
-                                5, // cache for 5 seconds
-                                function () use ($xtream) {
-                                    $userInfo = $xtream->userInfo(timeout: 3);
-
-                                    return $userInfo ?: [];
-                                }
-                            );
-                        }
-                    } catch (\Exception $e) {
-                        Log::error('Failed to fetch metadata for Xtream playlist '.$this->id, ['exception' => $e]);
-                    }
+                $key = "p:{$attributes['id']}:xtream_status";
+                $cached = Cache::get($key);
+                if ($cached !== null) {
+                    return $cached;
                 }
 
-                return is_string($results)
-                    ? json_decode($results, true)
-                    : $results;
+                // Dispatch job to update in background if not cached/cache expired
+                UpdateXtreamStats::dispatch($this);
+
+                // Return stored value from database
+                $results = is_string($value)
+                    ? json_decode($value, true)
+                    : ($value ?? []);
+
+                return $results;
             }
         );
     }

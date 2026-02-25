@@ -47,3 +47,15 @@ data/
 *ANALYSIS*.md
 *SUMMARY*.md
 *FIXES*.md
+app/context.md
+docs/provider-profiles-plan.md
+npm_output.log
+.github/agents
+.github/instructions
+.github/prompts
+*.log
+docker-compose.ci-test.yml
+docker-compose.local.yml
+fast-build.sh
+.opencode/
+.tmp/

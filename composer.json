@@ -12,7 +12,7 @@
         "php": "^8.2",
         "ashallendesign/short-url": "^8.3",
         "calebporzio/sushi": "^2.5",
-        "dedoc/scramble": "^0.12.11",
+        "dedoc/scramble": "^0.13.10",
         "dragonmantank/cron-expression": "^3.4",
         "filament/filament": "^4.0",
         "filament/spatie-laravel-settings-plugin": "^4.0",
@@ -38,14 +38,14 @@
         "beyondcode/laravel-dump-server": "^2.0",
         "fakerphp/faker": "^1.23",
         "laravel-shift/blueprint": "^2.10",
-        "laravel/boost": "^1.0",
+        "laravel/boost": "^2.0",
         "laravel/pail": "^1.1",
         "laravel/pint": "^1.13",
         "laravel/sail": "^1.39",
         "mockery/mockery": "^1.6",
         "nunomaduro/collision": "^8.1",
-        "pestphp/pest": "^3.7",
-        "pestphp/pest-plugin-laravel": "^3.0"
+        "pestphp/pest": "^4.0",
+        "pestphp/pest-plugin-laravel": "^4.0"
     },
     "autoload": {
         "psr-4": {

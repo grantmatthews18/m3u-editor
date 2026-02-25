@@ -19,6 +19,11 @@ Schedule::command('app:refresh-playlist')
     ->everyMinute()
     ->withoutOverlapping();
 
+// Refresh media server integrations
+Schedule::command('app:refresh-media-server-integrations')
+    ->everyMinute()
+    ->withoutOverlapping();
+
 // Refresh EPG
 Schedule::command('app:refresh-epg')
     ->everyMinute()
@@ -46,3 +51,25 @@ Schedule::command('queue:prune-failed --hours=48')
 // Prune old notifications
 Schedule::command('app:prune-old-notifications --days=7')
     ->daily();
+
+// Ensure m3u-proxy webhook is registered (handles proxy restarts, delayed startup, etc.)
+Schedule::command('m3u-proxy:register-webhook')
+    ->everyFiveMinutes()
+    ->withoutOverlapping();
+
+// Reconcile profile connection counts
+Schedule::command('profiles:reconcile')
+    ->everyFiveMinutes()
+    ->withoutOverlapping();
+
+// Refresh provider profile info (every 15 minutes)
+Schedule::job(new \App\Jobs\RefreshPlaylistProfiles)
+    ->everyFifteenMinutes()
+    ->withoutOverlapping();
+
+// Regenerate network schedules (hourly check, regenerates when needed)
+Schedule::command('networks:regenerate-schedules')
+    ->hourly()
+    ->withoutOverlapping();
+
+// Note: HLS broadcast files are managed by m3u-proxy service
