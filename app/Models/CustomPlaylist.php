@@ -391,4 +391,32 @@ class CustomPlaylist extends Model
     {
         return (bool) $this->use_regex_channel_management;
     }
+
+    /**
+     * Boot the model and hook into the saved event so that regex channel
+     * management can be reapplied whenever the playlist is modified.  This is
+     * necessary because the channel list is read-only in the UI, so the only
+     * way to re-enable previously-disabled channels is to recalc the pattern
+     * when the playlist itself is saved (e.g. when the output settings form is
+     * submitted).
+     */
+    protected static function booted(): void
+    {
+        // use the "saving" event rather than "saved" so that the recalculation
+        // occurs even if no playlist attributes are actually dirty.  Filament
+        // will happily hit the save button without changing anything, and the
+        // expectation is that regex-managed channels are recalculated on every
+        // save operation.
+        static::saving(function (self $playlist): void {
+            if (! $playlist->use_regex_channel_management) {
+                return;
+            }
+
+            // iterate all attached channels and re-run the matcher; the helper
+            // takes care of toggling the enabled flag based on the pattern
+            $playlist->channels()->get()->each(function (Channel $channel) use ($playlist) {
+                $playlist->applyEventPattern($channel);
+            });
+        });
+    }
 }
