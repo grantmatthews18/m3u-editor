@@ -5,18 +5,10 @@ namespace App\Filament\Resources\CustomPlaylists\RelationManagers;
 use App\Filament\Resources\Channels\ChannelResource;
 use App\Models\Channel;
 use Filament\Actions\AttachAction;
-use Filament\Actions\BulkAction;
-use Filament\Actions\CreateAction;
 use Filament\Actions\DetachAction;
-use Filament\Forms;
-use Filament\Forms\Components\Select;
-use Filament\Forms\Components\TextInput;
-use Filament\Forms\Components\Toggle;
-use Filament\Notifications\Notification;
 use Filament\Resources\RelationManagers\RelationManager;
 use Filament\Schemas\Components\Tabs\Tab;
 use Filament\Schemas\Schema;
-use Filament\Tables;
 use Filament\Tables\Columns\SpatieTagsColumn;
 use Filament\Tables\Enums\RecordActionsPosition;
 use Filament\Tables\Filters\SelectFilter;
@@ -42,6 +34,7 @@ class ChannelsRelationManager extends RelationManager
     public function isReadOnly(): bool
     {
         $owner = $this->ownerRecord;
+
         return (bool) ($owner instanceof \App\Models\CustomPlaylist && $owner->usesRegexManagement());
     }
 
@@ -132,6 +125,7 @@ class ChannelsRelationManager extends RelationManager
                 if (method_exists($col, 'disabled')) {
                     $col->disabled(true);
                 }
+
                 return $col;
             }, $defaultColumns);
 
@@ -144,6 +138,17 @@ class ChannelsRelationManager extends RelationManager
             //     ->disableActions()
             //     ->disableBulkActions()
             //     ->disableFilters();
+        }
+
+        // before returning the table, build toolbar actions if the owner is not
+        // in regex mode.  Keeping the toolbar around while read-only would allow
+        // bulk edits / attaches despite the UI being otherwise disabled.
+        $toolbarActions = [];
+        if (! ($ownerRecord instanceof \App\Models\CustomPlaylist && $ownerRecord->usesRegexManagement())) {
+            $toolbarActions = [
+                AttachAction::make(),
+                ...ChannelResource::getTableBulkActions(addToCustom: false),
+            ];
         }
 
         return $table->persistFiltersInSession()
@@ -176,7 +181,8 @@ class ChannelsRelationManager extends RelationManager
                     ->size('sm')
                     ->hidden(fn () => $ownerRecord->usesRegexManagement()),
                 ...ChannelResource::getTableActions(),
-            ], position: RecordActionsPosition::BeforeCells);
+            ], position: RecordActionsPosition::BeforeCells)
+            ->toolbarActions($toolbarActions);
 
         // end of table configuration
     }
