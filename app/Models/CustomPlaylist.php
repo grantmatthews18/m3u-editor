@@ -287,7 +287,10 @@ class CustomPlaylist extends Model
             return null;
         }
 
-        if (! preg_match($regex, $channel->name ?? '', $matches)) {
+        // pick the field that actually contains the display text
+        $text = $channel->title_custom ?? $channel->title ?? $channel->name ?? '';
+
+        if (! preg_match($regex, $text, $matches)) {
             if (! empty($config['disable_if_empty'])) {
                 $channel->update(['enabled' => false]);
             }
