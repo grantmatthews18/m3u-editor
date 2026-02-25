@@ -155,3 +155,24 @@ it('allows enabling regex channel management without crashing the playlist form'
     // And the repeater should now be visible when the page is re-rendered
     $page->assertFormFieldExists('event_patterns');
 });
+
+it('does not crash when a playlist has a tag without an english name', function () {
+    // create a tag that only has a Spanish name
+    $tag = Tag::create([
+        'name' => ['es' => 'Deportes'],
+        'slug' => Str::slug('Deportes'),
+        'type' => $this->customPlaylist->uuid,
+    ]);
+    $this->customPlaylist->attachTag($tag);
+
+    $this->customPlaylist->update(['use_regex_channel_management' => false]);
+
+    $page = Livewire::test(\App\Filament\Resources\CustomPlaylists\Pages\EditCustomPlaylist::class, [
+        'record' => $this->customPlaylist->id,
+    ]);
+
+    // toggling should still render the form without error
+    $page->fillForm([
+        'use_regex_channel_management' => true,
+    ])->assertHasNoFormErrors();
+});
