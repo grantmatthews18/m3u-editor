@@ -344,7 +344,6 @@ class CustomPlaylistResource extends Resource
                                 ->inline(false),
                         ])
                         ->createItemButtonLabel('Add pattern')
-                        ->disableReordering()
                         ->default([]),
                 ]),
             Section::make('Streaming Output')
