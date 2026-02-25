@@ -337,20 +337,24 @@ class EpgApiControllerTest extends TestCase
             'group' => $group->name,
             'enabled' => true,
             'is_vod' => false,
-            'name' => 'Concert|2026-01-01 20:00',
+            'name' => 'US (ESPN+ 001) | Fairways of Life with Matt Adams Feb 25 9:00AM ET (2026-02-25 09:00:00)',
         ]);
 
         // Configure the playlist event pattern for this group
         $this->playlist->update([
             'event_patterns' => [
-                $group->name => [
-                    'pattern' => '/^(?P<event>[^|]+)\|(?P<start>\d{4}-\d{2}-\d{2} \d{2}:\d{2})$/',
+                [
+                    'group' => 'Sports',
+                    'pattern' => '/\|\s*(?P<event>.+?)\s*\((?P<start>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\)\s*$/',
                     'timezone' => 'UTC',
                     'default_length' => 60,
                     'disable_if_empty' => true,
                 ],
             ],
         ]);
+
+        // sanity check that the helper can find and apply the pattern directly
+        $this->assertNotNull($this->playlist->applyEventPattern($channel));
 
         $response = $this->getJson("/api/epg/playlist/{$this->playlist->uuid}/data");
         $response->assertSuccessful();

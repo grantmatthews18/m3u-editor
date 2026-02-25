@@ -243,21 +243,40 @@ class CustomPlaylist extends Model
     /**
      * Retrieve the event pattern configuration for a given channel group.
      *
+     * The repeater stores its data as a numeric array where each entry is an
+     * associative array containing a "group" key, so we must look through the
+     * list rather than indexing directly by group name.
+     *
      * @param  string|null  $group
      * @return array|null
      */
     public function getEventPatternForGroup(?string $group): ?array
     {
-        if (empty($group)) {
-            return null;
-        }
-
         $patterns = $this->event_patterns ?? [];
         if (! is_array($patterns)) {
             return null;
         }
 
-        return $patterns[$group] ?? null;
+        // first, try to find an entry whose 'group' field matches exactly
+        foreach ($patterns as $entry) {
+            if (isset($entry['group']) && $entry['group'] === $group) {
+                return $entry;
+            }
+        }
+
+        // if there is only one pattern defined, assume it applies to everything
+        if (count($patterns) === 1) {
+            return $patterns[0];
+        }
+
+        // check for a wildcard/empty pattern
+        foreach ($patterns as $entry) {
+            if (isset($entry['group']) && in_array($entry['group'], ['', '*'], true)) {
+                return $entry;
+            }
+        }
+
+        return null;
     }
 
     /**
