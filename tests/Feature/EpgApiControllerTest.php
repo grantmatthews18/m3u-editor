@@ -1026,4 +1026,48 @@ class EpgApiControllerTest extends TestCase
         $this->assertEquals('2026-03-01T12:00:00+00:00', $firstProgramme['start']);
         $this->assertEquals(30, Carbon::parse($firstProgramme['start'])->diffInMinutes(Carbon::parse($firstProgramme['stop'])));
     }
+
+    public function test_apply_event_pattern_uses_original_channel_values()
+    {
+        $custom = \App\Models\CustomPlaylist::factory()->for($this->user)->create();
+        $group = Group::factory()->create([ 'name' => 'News', 'user_id' => $this->user->id ]);
+
+        $channel = Channel::factory()->create([
+            'playlist_id' => $this->playlist->id,
+            'custom_playlist_id' => $custom->id,
+            'user_id' => $this->user->id,
+            'group_id' => $group->id,
+            'group' => $group->name,
+            'enabled' => true,
+            'is_vod' => false,
+            'name' => 'Local 6PM News 2026-05-01',
+        ]);
+        $custom->channels()->syncWithoutDetaching($channel->id);
+
+        $custom->update([
+            'use_regex_channel_management' => true,
+            'event_patterns' => [
+                [
+                    'group' => 'News',
+                    'pattern' => '/Local\s+(?P<event>6PM News)\s+(?P<start>\d{4}-\d{2}-\d{2})/',
+                    'timezone' => 'UTC',
+                    'default_length' => 60,
+                    'disable_if_empty' => true,
+                ],
+            ],
+        ]);
+
+        // first application should match and set title_custom
+        $first = $custom->applyEventPattern($channel);
+        $this->assertNotNull($first);
+        $this->assertEquals('6PM News', $channel->title_custom);
+
+        // mutate title_custom manually to simulate a second run operating on
+        // changed data
+        $channel->title_custom = 'Something Else';
+
+        $second = $custom->applyEventPattern($channel);
+        $this->assertNotNull($second, 'pattern should still match even after the model was mutated');
+        $this->assertEquals('6PM News', $second['event']);
+    }
 }

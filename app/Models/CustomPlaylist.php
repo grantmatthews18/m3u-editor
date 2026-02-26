@@ -298,6 +298,14 @@ class CustomPlaylist extends Model
             }
         }
 
+        // build the text to run the regex against.  use the *original* values
+        // from the model rather than any attributes that may have been modified
+        // earlier during the same request (for example we mutate `title_custom`
+        // when returning API responses).  this preserves the original name/title
+        // so patterns continue to work even after the channel has been "cleaned".
+        $orig = $channel->getOriginal();
+        $text = $orig['name_custom'] ?? $orig['name'] ?? $orig['title_custom'] ?? $orig['title'] ?? '';
+
         $patterns = $this->event_patterns ?? [];
         if (! is_array($patterns)) {
             return null;
@@ -306,8 +314,6 @@ class CustomPlaylist extends Model
         $bestConfig = null;
         $bestMatches = [];
         $bestScore = -1;
-
-        $text = $channel->name_custom ?? $channel->name ?? $channel->title_custom ?? $channel->title ?? '';
 
         foreach ($patterns as $entry) {
             $entryGroup = $entry['group'] ?? '';
