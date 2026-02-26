@@ -406,7 +406,7 @@ class EpgApiControllerTest extends TestCase
             'event_patterns' => [
                 [
                     'group' => 'Sports',
-                    'pattern' => '/\|\s*(?P<event>.+?)\s*\((?P<start>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\)\s*$/',
+                    'pattern' => '/\|\s*(?P<event>(?!\()\S(?:.*?\S)?)(?:\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b.*?)*\s*\((?P<start>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\)\s*$/',
                     'timezone' => 'UTC',
                     'default_length' => 60,
                     'disable_if_empty' => true,
@@ -424,7 +424,7 @@ class EpgApiControllerTest extends TestCase
 
         $channel->refresh();
         // event parsed from name should be everything between the pipe and the date
-        $expectedEvent = 'Fairways of Life with Matt Adams Feb 25 9:00AM ET';
+        $expectedEvent = 'Fairways of Life with Matt Adams';
         $this->assertEquals($expectedEvent, $channel->title_custom);
 
         // instead of assuming key matches channel id, just pick the first programmes list
@@ -441,6 +441,65 @@ class EpgApiControllerTest extends TestCase
         $start = Carbon::parse($firstProgramme['start']);
         $stop = Carbon::parse($firstProgramme['stop']);
         $this->assertEquals(60, $start->diffInMinutes($stop));
+    }
+
+    public function test_multiple_patterns_for_same_group_are_evaluated_in_order()
+    {
+        $custom = \App\Models\CustomPlaylist::factory()->for($this->user)->create([
+            'dummy_epg' => true,
+            'dummy_epg_length' => 180,
+            'dummy_epg_category' => true,
+        ]);
+
+        $group = Group::factory()->create([
+            'name' => 'Sports',
+            'user_id' => $this->user->id,
+        ]);
+
+        $channel = Channel::factory()->create([
+            'playlist_id' => $this->playlist->id,
+            'custom_playlist_id' => $custom->id,
+            'user_id' => $this->user->id,
+            'group_id' => $group->id,
+            'group' => $group->name,
+            'enabled' => true,
+            'is_vod' => false,
+            'name' => 'US (ESPN+ 001) | Fairways of Life with Matt Adams Feb 25 9:00AM ET (2026-02-25 09:00:00)',
+        ]);
+        $custom->channels()->syncWithoutDetaching($channel->id);
+
+        $custom->update([
+            'use_regex_channel_management' => true,
+            'event_patterns' => [
+                // overly‑broad rule that matches any timestamp but doesn't
+                // capture a useful group – if this one were blindly used the
+                // result would be a three‑hour programme because default_length
+                // is 180 here.
+                [
+                    'group' => 'Sports',
+                    'pattern' => '/\b(?:\d{1,2}:\d{2}(?:AM|PM))\b/',
+                    'timezone' => 'UTC',
+                    'default_length' => 180,
+                    'disable_if_empty' => true,
+                ],
+                // the real rule that extracts the full date/time and the
+                // event name; it should be picked even though it comes second.
+                [
+                    'group' => 'Sports',
+                    'pattern' => '/\|\s*(?P<event>(?!\()\S(?:.*?\S)?)(?:\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b.*?)*\s*\((?P<start>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\)\s*$/',
+                    'timezone' => 'UTC',
+                    'default_length' => 60,
+                    'disable_if_empty' => true,
+                ],
+            ],
+        ]);
+
+        // ensure the helper picks the correct pattern instead of the first one
+        $patternInfo = $custom->applyEventPattern($channel);
+        $this->assertNotNull($patternInfo);
+        $this->assertEquals('Fairways of Life with Matt Adams', $channel->title_custom);
+        $this->assertEquals('2026-02-25 09:00:00', $patternInfo['start']->toDateTimeString());
+        $this->assertEquals(60, $patternInfo['start']->diffInMinutes($patternInfo['stop']));
     }
 
     public function test_event_pattern_disables_channel_when_no_match()
@@ -627,5 +686,88 @@ class EpgApiControllerTest extends TestCase
         $channel->refresh();
         $this->assertNull($channel->title_custom);
         $this->assertTrue($channel->enabled);
+    }
+
+    public function test_event_pattern_strips_trailing_date_code_from_event()
+    {
+        $custom = \App\Models\CustomPlaylist::factory()->for($this->user)->create([
+            'dummy_epg' => true,
+            'dummy_epg_length' => 120,
+            'dummy_epg_category' => true,
+        ]);
+
+        $group = Group::factory()->create([
+            'name' => 'Sports',
+            'user_id' => $this->user->id,
+        ]);
+
+        $channel = Channel::factory()->create([
+            'playlist_id' => $this->playlist->id,
+            'custom_playlist_id' => $custom->id,
+            'user_id' => $this->user->id,
+            'group_id' => $group->id,
+            'group' => $group->name,
+            'enabled' => true,
+            'is_vod' => false,
+            'name' => 'US (ESPN+ 031) | Massachusetts vs. Brown Feb 25 3:00PM ET (2026-02-25 15:00:45)',
+        ]);
+        $custom->channels()->syncWithoutDetaching($channel->id);
+
+        $custom->update([
+            'use_regex_channel_management' => true,
+            'event_patterns' => [
+                [
+                    'group' => 'Sports',
+                    'pattern' => '/\|\s*(?P<event>(?!\()\S(?:.*?\S)?)(?:\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b.*?)*\s*\((?P<start>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\)\s*$/',
+                    'timezone' => 'UTC',
+                    'default_length' => 60,
+                    'disable_if_empty' => true,
+                ],
+            ],
+        ]);
+
+        $this->assertNotNull($custom->applyEventPattern($channel));
+        $this->assertEquals('Massachusetts vs. Brown', $channel->title_custom);
+    }
+
+    public function test_event_pattern_ignores_title_with_only_timestamp()
+    {
+        $custom = \App\Models\CustomPlaylist::factory()->for($this->user)->create([
+            'dummy_epg' => true,
+            'dummy_epg_length' => 120,
+            'dummy_epg_category' => true,
+        ]);
+
+        $group = Group::factory()->create([
+            'name' => 'Sports',
+            'user_id' => $this->user->id,
+        ]);
+
+        $channel = Channel::factory()->create([
+            'playlist_id' => $this->playlist->id,
+            'custom_playlist_id' => $custom->id,
+            'user_id' => $this->user->id,
+            'group_id' => $group->id,
+            'group' => $group->name,
+            'enabled' => true,
+            'is_vod' => false,
+            'name' => 'US (ESPN+ 491) | (2098-12-31 08:05:10)',
+        ]);
+        $custom->channels()->syncWithoutDetaching($channel->id);
+
+        $custom->update([
+            'use_regex_channel_management' => true,
+            'event_patterns' => [
+                [
+                    'group' => 'Sports',
+                    'pattern' => '/\|\s*(?P<event>(?!\()\S(?:.*?\S)?)(?:\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b.*?)*\s*\((?P<start>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\)\s*$/',
+                    'timezone' => 'UTC',
+                    'default_length' => 60,
+                    'disable_if_empty' => true,
+                ],
+            ],
+        ]);
+
+        $this->assertNull($custom->applyEventPattern($channel));
     }
 }

@@ -559,6 +559,7 @@ class EpgApiController extends Controller
                             'icon' => $icon,
                             'category' => $includeCategory ? $group : null,
                         ]];
+
                         continue;
                     }
 

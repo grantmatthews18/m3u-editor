@@ -2,7 +2,6 @@
 
 namespace Tests\Feature;
 
-use App\Console\Commands\RunRegexSync;
 use App\Models\Channel;
 use App\Models\CustomPlaylist;
 use App\Models\Group;

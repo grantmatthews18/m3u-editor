@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Enums\PlaylistChannelId;
 use App\Traits\ShortUrlTrait;
+use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -12,8 +13,6 @@ use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\MorphToMany;
 use Spatie\Tags\HasTags;
-use App\Models\Channel;
-use Carbon\Carbon;
 
 class CustomPlaylist extends Model
 {
@@ -247,9 +246,6 @@ class CustomPlaylist extends Model
      * The repeater stores its data as a numeric array where each entry is an
      * associative array containing a "group" key, so we must look through the
      * list rather than indexing directly by group name.
-     *
-     * @param  string|null  $group
-     * @return array|null
      */
     public function getEventPatternForGroup(?string $group): ?array
     {
@@ -287,9 +283,6 @@ class CustomPlaylist extends Model
      * depending on the pattern configuration. Returns an array containing
      * parsed event data (event, start, stop) when a match is found, or null
      * otherwise.
-     *
-     * @param  \App\Models\Channel  $channel
-     * @return array|null
      */
     public function applyEventPattern(Channel $channel): ?array
     {
@@ -305,39 +298,77 @@ class CustomPlaylist extends Model
             }
         }
 
-        $config = $this->getEventPatternForGroup($group);
-        if (empty($config) || empty($config['pattern'])) {
+        $patterns = $this->event_patterns ?? [];
+        if (! is_array($patterns)) {
             return null;
         }
 
-        // ensure the regex is valid
-        $regex = $config['pattern'];
+        $config = null;
         $matches = [];
-        if (@preg_match($regex, '') === false) {
-            // invalid regex, skip
-            return null;
-        }
 
-        // pick the field that actually contains the display text
-        // We want to always run the regex against the "name" fields (which contain the
-        // full original string) rather than title_custom, because title_custom is used
-        // to store the parsed event name.  If we matched on title_custom we would
-        // immediately disable a channel on the next invocation since the event string
-        // will no longer contain the date/time portion.  The playlist controllers apply
-        // the pattern once per request, so re-running should be idempotent.
+        // we'll keep track of the first regex that actually matched at all in
+        // case none of the matching rules produce any named captures; that way a
+        // plain "/match/" rule still works when there isn't a more specific
+        // extractor further down the list.
+        $firstMatchConfig = null;
+        $firstMatchResults = [];
+
         $text = $channel->name_custom ?? $channel->name ?? $channel->title_custom ?? $channel->title ?? '';
 
-        if (! preg_match($regex, $text, $matches)) {
-            if (! empty($config['disable_if_empty'])) {
-                $channel->update(['enabled' => false]);
+        foreach ($patterns as $entry) {
+            $entryGroup = $entry['group'] ?? '';
+            if ($entryGroup !== $group && $entryGroup !== '' && $entryGroup !== '*') {
+                continue;
+            }
+
+            $regex = $entry['pattern'] ?? '';
+            if (@preg_match($regex, '') === false) {
+                continue;
+            }
+
+            if (preg_match($regex, $text, $tempMatches)) {
+                if (is_null($firstMatchConfig)) {
+                    $firstMatchConfig = $entry;
+                    $firstMatchResults = $tempMatches;
+                }
+
+                // if this pattern gave us anything useful, pick it immediately
+                if (! empty($tempMatches['event']) || ! empty($tempMatches['start']) || ! empty($tempMatches['end'])) {
+                    $config = $entry;
+                    $matches = $tempMatches;
+                    break;
+                }
+            }
+        }
+
+        // if we didn't break out with a capturing rule, fall back to the first
+        // matching rule we saw (if any)
+        if (is_null($config) && $firstMatchConfig) {
+            $config = $firstMatchConfig;
+            $matches = $firstMatchResults;
+        }
+
+        if (is_null($config)) {
+            // nothing matched at all – apply disable_if_empty from any
+            // applicable entry and bail out.
+            foreach ($patterns as $entry) {
+                $entryGroup = $entry['group'] ?? '';
+                if ($entryGroup !== $group && $entryGroup !== '' && $entryGroup !== '*') {
+                    continue;
+                }
+
+                if (! empty($entry['disable_if_empty'])) {
+                    $channel->update(['enabled' => false]);
+                    break;
+                }
             }
 
             return null;
         }
 
-        // At this point we have a match; re-enable the channel if the user asked for
-        // unmatched channels to be disabled.  This covers the case where a channel
-        // was previously disabled by an earlier run and now the pattern succeeds.
+        // at this point we have a configuration that matched the text (either
+        // capturing or not).  the old logic re‑enabled the channel if
+        // disable_if_empty was set on the chosen rule.
         if (! empty($config['disable_if_empty'])) {
             $channel->update(['enabled' => true]);
         }
@@ -372,7 +403,6 @@ class CustomPlaylist extends Model
             $stop = $start->copy()->addMinutes($defaultLength);
         }
 
-        // rename the channel if event name provided
         if ($event) {
             $channel->update(['title_custom' => $event]);
         }

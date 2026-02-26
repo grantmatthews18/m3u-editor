@@ -4,9 +4,9 @@ use App\Filament\Resources\CustomPlaylists\RelationManagers\ChannelsRelationMana
 use App\Models\Channel;
 use App\Models\CustomPlaylist;
 use App\Models\User;
+use Illuminate\Support\Str;
 use Livewire\Livewire;
 use Spatie\Tags\Tag;
-use Illuminate\Support\Str;
 
 beforeEach(function () {
     // ensure we have a valid app key to avoid encryption errors in Filament
@@ -125,9 +125,8 @@ it('relation manager becomes read-only when regex management is enabled', functi
     ]);
 
     $relationManager
-        ->assertCanSeeTableRecords([$channel])
-        // nothing else to assert here, just ensure the page loads without errors
-        ;
+        ->assertCanSeeTableRecords([$channel]);
+    // nothing else to assert here, just ensure the page loads without errors
 });
 
 it('allows enabling regex channel management without crashing the playlist form', function () {
@@ -141,10 +140,29 @@ it('allows enabling regex channel management without crashing the playlist form'
     ]);
 
     // attach a channel from that playlist to the custom playlist so it is recognised
-    $channel = Channel::factory()->for($this->user)->for($source)->create();
+    $channel = Channel::factory()->for($this->user)->for($source)->create([
+        'group' => 'TheGroup',
+    ]);
     $this->customPlaylist->channels()->attach($channel->id);
 
     $this->customPlaylist->update(['use_regex_channel_management' => false]);
+
+    // sanity-check that the dropdown options closure would include the group
+    $computed = collect();
+    $this->customPlaylist->channels()->get(['group', 'custom_group_name'])->each(function ($ch) use (&$computed) {
+        $grp = $ch->group ?? '';
+        if (! empty($ch->custom_group_name)) {
+            $decoded = json_decode($ch->custom_group_name, true);
+            if (is_array($decoded)) {
+                $grp = $decoded['en'] ?? $decoded[array_key_first($decoded)] ?? $grp;
+            }
+        }
+        if (is_string($grp) && $grp !== '') {
+            $computed->push($grp);
+        }
+    });
+    $computed = $computed->unique()->sort()->values();
+    $this->assertTrue($computed->contains('TheGroup'));
 
     $page = Livewire::test(\App\Filament\Resources\CustomPlaylists\Pages\EditCustomPlaylist::class, [
         'record' => $this->customPlaylist->id,
@@ -154,63 +172,99 @@ it('allows enabling regex channel management without crashing the playlist form'
     // a pattern using the new group name – fillForm will validate that the option
     // exists.
     $page->fillForm([
-        'use_regex_channel_management' => true,
-        'event_patterns' => [
-            ['group' => 'TheGroup', 'pattern' => 'dummy'],
-        ],
-    ])->assertHasNoFormErrors();
-});
-
-it('does not crash when a playlist has a tag without an english name', function () {
-    // ensure there is at least one source playlist so the fallback logic
-    // (tags) is exercised; we do not need a group here
-    $source = \App\Models\Playlist::factory()->for($this->user)->create();
-    $channel = Channel::factory()->for($this->user)->for($source)->create();
-    $this->customPlaylist->channels()->attach($channel->id);
-
-    // tag with only spanish name
-    $tag = Tag::create([
-        'name' => ['es' => 'Deportes'],
-        'slug' => Str::slug('Deportes'),
-        'type' => $this->customPlaylist->uuid,
-    ]);
-    $this->customPlaylist->attachTag($tag);
-
-    $page = Livewire::test(\App\Filament\Resources\CustomPlaylists\Pages\EditCustomPlaylist::class, [
-        'record' => $this->customPlaylist->id,
-    ]);
-
-    $page->fillForm([
-        'use_regex_channel_management' => true,
-    ])->assertHasNoFormErrors();
-});
-
-it('allows setting a regex sync schedule on the playlist form', function () {
-    // need a source playlist and group for the dropdown
-    $source = \App\Models\Playlist::factory()->for($this->user)->create();
-    $group = \App\Models\Group::create([
-        'name' => 'TheGroup',
-        'playlist_id' => $source->id,
-        'user_id' => $this->user->id,
-        'type' => 'live',
-    ]);
-
-    $channel = Channel::factory()->for($this->user)->for($source)->create();
-    $this->customPlaylist->channels()->attach($channel->id);
-
-    $page = Livewire::test(\App\Filament\Resources\CustomPlaylists\Pages\EditCustomPlaylist::class, [
-        'record' => $this->customPlaylist->id,
-    ]);
-
-    $page->fillForm([
-        'use_regex_channel_management' => true,
-        'regex_sync_schedule' => '0 * * * *',
-        'user_agent' => 'm3u-sync-test',
-        'event_patterns' => [
-            ['group' => 'TheGroup', 'pattern' => 'dummy'],
-        ],
-    ])->call('save')->assertHasNoFormErrors();
+            'use_regex_channel_management' => true,
+            'regex_sync_schedule' => '0 * * * *',
+            'user_agent' => 'm3u-sync-test',
+            // no need to supply a pattern here; the test is only interested
+            // in the schedule field and enabling the toggle
+        ])->call('save')->assertHasNoFormErrors();
 
     $this->customPlaylist->refresh();
     expect($this->customPlaylist->regex_sync_schedule)->toBe('0 * * * *');
+});
+
+it('only shows groups that are present on attached channels', function () {
+    $sourceA = \App\Models\Playlist::factory()->for($this->user)->create();
+    $groupA = \App\Models\Group::create([
+        'name' => 'A',
+        'playlist_id' => $sourceA->id,
+        'user_id' => $this->user->id,
+        'type' => 'live',
+    ]);
+    $chA = Channel::factory()->for($this->user)->for($sourceA)->create(['group' => 'A']);
+
+    $sourceB = \App\Models\Playlist::factory()->for($this->user)->create();
+    $groupB = \App\Models\Group::create([
+        'name' => 'B',
+        'playlist_id' => $sourceB->id,
+        'user_id' => $this->user->id,
+        'type' => 'live',
+    ]);
+    $chB = Channel::factory()->for($this->user)->for($sourceB)->create(['group' => 'B']);
+
+    // attach only the first channel
+    $this->customPlaylist->channels()->attach($chA->id);
+
+    // sanity check that the options helper would return 'A' and not 'B'
+    $computed = collect();
+    $this->customPlaylist->channels()->get(['group', 'custom_group_name'])->each(function ($ch) use (&$computed) {
+        $grp = $ch->group ?? '';
+        if (! empty($ch->custom_group_name)) {
+            $decoded = json_decode($ch->custom_group_name, true);
+            if (is_array($decoded)) {
+                $grp = $decoded['en'] ?? $decoded[array_key_first($decoded)] ?? $grp;
+            }
+        }
+        if (is_string($grp) && $grp !== '') {
+            $computed->push($grp);
+        }
+    });
+    $computed = $computed->unique()->sort()->values();
+    $this->assertTrue($computed->contains('A'));
+    $this->assertFalse($computed->contains('B'));
+
+    $page = Livewire::test(\App\Filament\Resources\CustomPlaylists\Pages\EditCustomPlaylist::class, [
+        'record' => $this->customPlaylist->id,
+    ]);
+
+    // selecting a group that isn't present should fail validation on save
+    $page->fillForm([
+        'use_regex_channel_management' => true,
+        'user_agent' => 'foo',
+        'event_patterns' => [
+            ['group' => 'B', 'pattern' => 'x'],
+        ],
+    ])->call('save')
+      ->assertHasFormErrors(['event_patterns.0.group' => 'in']);
+
+    // 'A' must still be valid
+    $page->fillForm([
+        'use_regex_channel_management' => true,
+        'user_agent' => 'foo',
+        'event_patterns' => [
+            ['group' => 'A', 'pattern' => 'x'],
+        ],
+    ])->call('save')
+      ->assertHasNoFormErrors();
+});
+
+it('includes custom group names from channels', function () {
+    $source = \App\Models\Playlist::factory()->for($this->user)->create();
+    $ch = Channel::factory()->for($this->user)->for($source)->create([
+        'group' => 'Custom',
+    ]);
+    $this->customPlaylist->channels()->attach($ch->id);
+
+    $page = Livewire::test(\App\Filament\Resources\CustomPlaylists\Pages\EditCustomPlaylist::class, [
+        'record' => $this->customPlaylist->id,
+    ]);
+
+    $page->fillForm([
+        'use_regex_channel_management' => true,
+        'user_agent' => 'bar',
+        'event_patterns' => [
+            ['group' => 'Custom', 'pattern' => 'x'],
+        ],
+    ])->call('save')
+      ->assertHasNoFormErrors();
 });

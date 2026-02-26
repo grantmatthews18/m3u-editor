@@ -425,6 +425,7 @@ class EpgGenerateController extends Controller
                         echo '    <category lang="en">'.$group.'</category>'.PHP_EOL;
                     }
                     echo '  </programme>'.PHP_EOL;
+
                     continue;
                 }
 

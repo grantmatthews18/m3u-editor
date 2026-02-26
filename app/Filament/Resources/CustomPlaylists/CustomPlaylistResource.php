@@ -371,38 +371,60 @@ class CustomPlaylistResource extends Resource
                                         return [];
                                     }
 
-                                    // look up any real groups belonging to the source playlist(s)
-                                    $sourceIds = $playlist->getSourcePlaylists()->pluck('id')->all();
+                                    $options = collect();
 
-                                    $options = [];
-                                    if (! empty($sourceIds)) {
-                                        $options = \App\Models\Group::query()
-                                            ->whereIn('playlist_id', $sourceIds)
-                                            ->where('type', 'live')
-                                            ->where('user_id', auth()->id())
-                                            ->orderBy('name')
-                                            ->pluck('name', 'name')
-                                            ->toArray();
+                                    // prefer the groups that are actually used by the
+                                    // channels in this custom playlist.  this covers
+                                    // both "real" group records and free‑text/custom
+                                    // names that have been assigned on individual
+                                    // channels.
+                                    $playlist->channels()->get(['group', 'custom_group_name'])
+                                        ->each(function ($ch) use (&$options) {
+                                            $group = $ch->group ?? '';
+                                            if (! empty($ch->custom_group_name)) {
+                                                $decoded = json_decode($ch->custom_group_name, true);
+                                                if (is_array($decoded)) {
+                                                    $group = $decoded['en'] ?? $decoded[array_key_first($decoded)] ?? $group;
+                                                }
+                                            }
+
+                                            if (is_string($group) && $group !== '') {
+                                                $options->push($group);
+                                            }
+                                        });
+
+                                    $options = $options->unique()->sort()->values();
+
+                                    if ($options->isEmpty()) {
+                                        // no channels attached yet – fall back to the
+                                        // old source‑playlist logic (same as before)
+                                        $sourceIds = $playlist->getSourcePlaylists()->pluck('id')->all();
+
+                                        if (! empty($sourceIds)) {
+                                            $options = \App\Models\Group::query()
+                                                ->whereIn('playlist_id', $sourceIds)
+                                                ->where('type', 'live')
+                                                ->where('user_id', auth()->id())
+                                                ->orderBy('name')
+                                                ->pluck('name')
+                                                ->toBase();
+                                        }
+
+                                        if ($options->isEmpty()) {
+                                            $options = $playlist->groupTags()
+                                                ->get()
+                                                ->map(fn ($tag) => data_get($tag, 'name.en'))
+                                                ->filter()
+                                                ->unique()
+                                                ->values();
+                                        }
                                     }
 
-                                    // fall back to the tag-based names if there are none
-                                    if (empty($options)) {
-                                        $options = $playlist->groupTags()
-                                            ->get()
-                                            ->mapWithKeys(fn ($tag) => [
-                                                data_get($tag, 'name.en') => data_get($tag, 'name.en'),
-                                            ])
-                                            ->filter(function ($label, $value) {
-                                                return is_string($value) && $value !== '' && is_string($label) && $label !== '';
-                                            })
-                                            ->toArray();
-                                    }
-
-                                    return $options;
+                                    return $options->mapWithKeys(fn ($v) => [$v => $v])->toArray();
                                 }),
                             TextInput::make('pattern')
                                 ->required()
-                                ->helperText('PCRE regex with named groups "event", "start" and optionally "end".'),
+                                ->helperText('PCRE regex with named groups "event", "start" and optionally "end".  You may add multiple rules for the same group; they are evaluated in list order and the first one whose expression matches the channel name will be applied.'),
                             TextInput::make('timezone')
                                 ->label('Timezone')
                                 ->placeholder('UTC')
