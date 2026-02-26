@@ -1041,6 +1041,9 @@ class EpgApiControllerTest extends TestCase
             'enabled' => true,
             'is_vod' => false,
             'name' => 'Local 6PM News 2026-05-01',
+            // give it a completely different custom title so we can prove the
+            // regex does *not* run against it
+            'title_custom' => 'UNRELATED TITLE',
         ]);
         $custom->channels()->syncWithoutDetaching($channel->id);
 

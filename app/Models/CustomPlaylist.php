@@ -298,13 +298,17 @@ class CustomPlaylist extends Model
             }
         }
 
-        // build the text to run the regex against.  use the *original* values
-        // from the model rather than any attributes that may have been modified
-        // earlier during the same request (for example we mutate `title_custom`
-        // when returning API responses).  this preserves the original name/title
-        // so patterns continue to work even after the channel has been "cleaned".
+        // build the text to run the regex against.  previously we looked at
+        // custom/title fields as well, which meant that once a channel had
+        // already been "cleaned" the rule would no longer match.  this caused
+        // problems for playlists that were regenerated over multiple builds.
+        //
+        // Instead we always evaluate the pattern on the channel's *name*
+        // column (the original name supplied when the channel was created).
+        // the regex is still allowed to update the title or custom name, but
+        // those mutated values are never used as the source text.
         $orig = $channel->getOriginal();
-        $text = $orig['name_custom'] ?? $orig['name'] ?? $orig['title_custom'] ?? $orig['title'] ?? '';
+        $text = $orig['name'] ?? '';
 
         $patterns = $this->event_patterns ?? [];
         if (! is_array($patterns)) {
