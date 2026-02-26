@@ -338,7 +338,7 @@ class CustomPlaylist extends Model
             }
             if (! empty($matches['end'])) {
                 $score += 5; // end without start should not really happen,
-                              // but give it some weight just in case
+                // but give it some weight just in case
             }
 
             if ($score > $bestScore) {
@@ -384,12 +384,34 @@ class CustomPlaylist extends Model
         $start = null;
         $stop = null;
 
+        // try to be liberal when parsing the returned strings; Carbon is nice
+        // but it occasionally refuses to parse things like "9:00AM ET", so we
+        // fall back to strtotime and even strip timezone abbreviations if we
+        // must.  we preserve the original string in the returned array so the
+        // caller can retry with additional logic if necessary.
         try {
             if ($startStr) {
                 $start = Carbon::parse($startStr, $timezone);
             }
         } catch (\Exception $e) {
             $start = null;
+            if ($startStr) {
+                try {
+                    $ts = strtotime($startStr);
+                    if ($ts !== false) {
+                        $start = Carbon::createFromTimestamp($ts, $timezone);
+                    }
+                } catch (\Exception $e2) {
+                    // last‑ditch: drop any trailing TZ abbreviations and try
+                    // again with whatever remains
+                    $clean = preg_replace('/\b[A-Z]{2,5}\b$/', '', $startStr);
+                    try {
+                        $start = Carbon::parse(trim($clean), $timezone);
+                    } catch (\Exception $e3) {
+                        $start = null;
+                    }
+                }
+            }
         }
 
         if ($endStr) {
@@ -397,6 +419,21 @@ class CustomPlaylist extends Model
                 $stop = Carbon::parse($endStr, $timezone);
             } catch (\Exception $e) {
                 $stop = null;
+                if ($endStr) {
+                    try {
+                        $ts = strtotime($endStr);
+                        if ($ts !== false) {
+                            $stop = Carbon::createFromTimestamp($ts, $timezone);
+                        }
+                    } catch (\Exception $e2) {
+                        $clean = preg_replace('/\b[A-Z]{2,5}\b$/', '', $endStr);
+                        try {
+                            $stop = Carbon::parse(trim($clean), $timezone);
+                        } catch (\Exception $e3) {
+                            $stop = null;
+                        }
+                    }
+                }
             }
         }
 
@@ -412,6 +449,7 @@ class CustomPlaylist extends Model
             'event' => $event,
             'start' => $start,
             'stop' => $stop,
+            'start_str' => $startStr,
         ];
     }
 

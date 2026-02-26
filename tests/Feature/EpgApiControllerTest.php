@@ -10,8 +10,8 @@ use App\Models\Playlist;
 use App\Models\User;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
-use Tests\TestCase;
 use Mockery;
+use Tests\TestCase;
 
 class EpgApiControllerTest extends TestCase
 {
@@ -885,7 +885,7 @@ class EpgApiControllerTest extends TestCase
             ->andReturn([
                 'foo' => [[
                     'start' => '2026-02-25T00:00:00+00:00',
-                    'stop'  => '2026-02-25T03:00:00+00:00',
+                    'stop' => '2026-02-25T03:00:00+00:00',
                     'title' => 'garbage',
                 ]],
             ]);
@@ -914,5 +914,116 @@ class EpgApiControllerTest extends TestCase
         $programmes = array_values($data['programmes'])[0];
         $first = $programmes[0];
         $this->assertEquals('2026-02-25T09:00:00+00:00', $first['start']);
+    }
+
+    public function test_regex_override_handles_unparseable_start_strings()
+    {
+        $custom = \App\Models\CustomPlaylist::factory()->for($this->user)->create([
+            'dummy_epg' => true,
+            'dummy_epg_length' => 120,
+            'dummy_epg_category' => true,
+        ]);
+
+        $group = Group::factory()->create([
+            'name' => 'Sports',
+            'user_id' => $this->user->id,
+        ]);
+
+        $channel = Channel::factory()->create([
+            'playlist_id' => $this->playlist->id,
+            'custom_playlist_id' => $custom->id,
+            'user_id' => $this->user->id,
+            'group_id' => $group->id,
+            'group' => $group->name,
+            'enabled' => true,
+            'is_vod' => false,
+            // the name contains a time with ET abbreviation which Carbon
+            // cannot parse directly
+            'name' => 'Foo Channel | Live Show (9:00AM ET)',
+        ]);
+        $custom->channels()->syncWithoutDetaching($channel->id);
+
+        $custom->update([
+            'use_regex_channel_management' => true,
+            'event_patterns' => [
+                [
+                    'group' => 'Sports',
+                    'pattern' => '/\|\s*Live Show \((?P<start>\d{1,2}:\d{2}(?:AM|PM) ET)\)/',
+                    'timezone' => 'UTC',
+                    'default_length' => 120,
+                    'disable_if_empty' => true,
+                ],
+            ],
+        ]);
+
+        // stub the cache service to return a programme with no start time
+        $fake = \Mockery::mock(EpgCacheService::class);
+        $this->app->instance(EpgCacheService::class, $fake);
+        $fake->shouldReceive('getCachedProgrammesRange')
+            ->andReturn([
+                $channel->id => [
+                    ['start' => null, 'stop' => null, 'title' => 'cached', 'desc' => 'cached', 'icon' => '', 'category' => null],
+                ],
+            ]);
+        $fake->shouldReceive('getCacheMetadata')->andReturn(['cache_created' => now(), 'total_programmes' => 1, 'programme_date_range' => null]);
+
+        $response = $this->getJson("/api/epg/playlist/{$custom->uuid}/data");
+        $response->assertSuccessful();
+        $data = $response->json();
+
+        $programmesList = array_values($data['programmes'])[0];
+        $this->assertNotEmpty($programmesList);
+
+        $firstProgramme = $programmesList[0];
+        $this->assertNotEmpty($firstProgramme['start'], 'Start time should be populated even if original string was unparseable');
+        $this->assertEquals(120, Carbon::parse($firstProgramme['start'])->diffInMinutes(Carbon::parse($firstProgramme['stop'])));
+    }
+
+    public function test_regex_creates_slot_without_dummy_epg()
+    {
+        $custom = \App\Models\CustomPlaylist::factory()->for($this->user)->create([
+            'dummy_epg' => false, // explicitly disabled
+        ]);
+
+        $group = Group::factory()->create([
+            'name' => 'Music',
+            'user_id' => $this->user->id,
+        ]);
+
+        $channel = Channel::factory()->create([
+            'playlist_id' => $this->playlist->id,
+            'custom_playlist_id' => $custom->id,
+            'user_id' => $this->user->id,
+            'group_id' => $group->id,
+            'group' => $group->name,
+            'enabled' => true,
+            'is_vod' => false,
+            'name' => 'Station | Top Hits (2026-03-01 12:00:00)',
+        ]);
+        $custom->channels()->syncWithoutDetaching($channel->id);
+
+        $custom->update([
+            'use_regex_channel_management' => true,
+            'event_patterns' => [
+                [
+                    'group' => 'Music',
+                    'pattern' => '/\|\s*Top Hits \((?P<start>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\)/',
+                    'timezone' => 'UTC',
+                    'default_length' => 30,
+                    'disable_if_empty' => true,
+                ],
+            ],
+        ]);
+
+        // no cache data at all (epg_id is null), the playlist should still
+        // return a programme based on the regex
+        $response = $this->getJson("/api/epg/playlist/{$custom->uuid}/data");
+        $response->assertSuccessful();
+        $data = $response->json();
+
+        $this->assertCount(1, $data['programmes']);
+        $firstProgramme = array_values($data['programmes'])[0][0];
+        $this->assertEquals('2026-03-01T12:00:00+00:00', $firstProgramme['start']);
+        $this->assertEquals(30, Carbon::parse($firstProgramme['start'])->diffInMinutes(Carbon::parse($firstProgramme['stop'])));
     }
 }

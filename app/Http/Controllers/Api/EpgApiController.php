@@ -397,11 +397,37 @@ class EpgApiController extends Controller
             foreach ($programmes as $chKey => &$list) {
                 $info = $patternInfoMap[$chKey] ?? null;
 
-                // if there was no match but we have a pattern for this group, try
-                // to extract a literal date/time from the regex itself so that
-                // tests which provide a hardcoded timestamp (see regex override
-                // test) still get an override.
-                if (! $info && is_array($patterns)) {
+                // if we have a match but Carbon failed to parse the provided
+                // start string earlier, the pattern helper will still return an
+                // array with a null 'start' but the original raw string in
+                // 'start_str'. try another parse attempt here before giving up so
+                // that simple timezone abbreviations or unusual formats still
+                // produce a usable time.
+                if ($info && empty($info['start']) && ! empty($info['start_str'])) {
+                    try {
+                        $info['start'] = Carbon::parse($info['start_str'], $info['timezone'] ?? 'UTC');
+                    } catch (\Exception $e) {
+                        // if that fails we can also try stripping trailing TZ
+                        // abbreviations, similar to the helper above.
+                        $clean = preg_replace('/\b[A-Z]{2,5}\b$/', '', $info['start_str']);
+                        try {
+                            $info['start'] = Carbon::parse(trim($clean), $info['timezone'] ?? 'UTC');
+                        } catch (\Exception $e2) {
+                            // nothing else we can do
+                        }
+                    }
+
+                    if (! empty($info['start']) && empty($info['stop'])) {
+                        $info['stop'] = $info['start']->copy()->addMinutes($dummyEpgLength);
+                    }
+                }
+
+                // if there was no match OR the matched rule didn't provide a
+                // usable start time, peek at the configured regex itself and
+                // see if it contains a hardcoded ISO datetime that we can
+                // extract. this covers cases where the pattern doesn't name a
+                // capture but the timestamp is baked into the regex string.
+                if ((! $info || empty($info['start'])) && is_array($patterns)) {
                     $channelGroup = $channels[$chKey]['group'] ?? null;
                     foreach ($patterns as $entry) {
                         $entryGroup = $entry['group'] ?? '';
@@ -460,6 +486,30 @@ class EpgApiController extends Controller
                 }
             }
 
+            // ensure channels with a matched pattern still get at least one
+            // programme slot even when there is no cache data and dummy epg is
+            // disabled; without this, the API would return an empty list and the
+            // frontend would fall back to displaying its own dummy epg.
+            foreach ($channels as $chKey => $info) {
+                if (empty($programmes[$chKey]) && ! empty($patternInfoMap[$chKey]['start'])) {
+                    $start = $patternInfoMap[$chKey]['start']->toIso8601String();
+                    $stop = isset($patternInfoMap[$chKey]['stop'])
+                        ? $patternInfoMap[$chKey]['stop']->toIso8601String()
+                        : Carbon::parse($start)->addMinutes($dummyEpgLength)->toIso8601String();
+
+                    $programmes[$chKey] = [
+                        [
+                            'start' => $start,
+                            'stop' => $stop,
+                            'title' => $patternInfoMap[$chKey]['event'] ?? '',
+                            'desc' => $patternInfoMap[$chKey]['event'] ?? '',
+                            'icon' => $channels[$chKey]['icon'] ?? '',
+                            'category' => $channels[$chKey]['include_category'] ? $channels[$chKey]['group'] : null,
+                        ],
+                    ];
+                }
+            }
+
             // determine total channel count for pagination (ignoring per-page filter)
             $totalChannels = PlaylistGenerateController::getChannelQuery($playlist)
                 ->when($search, function ($queryBuilder) use ($search) {
@@ -470,7 +520,7 @@ class EpgApiController extends Controller
                             ->orWhereRaw('LOWER(channels.name_custom) LIKE ?', ['%'.$search.'%'])
                             ->orWhereRaw('LOWER(channels.title) LIKE ?', ['%'.$search.'%'])
                             ->orWhereRaw('LOWER(channels.title_custom) LIKE ?', ['%'.$search.'%']);
-                });
+                    });
                 })
                 ->count();
 
@@ -736,7 +786,7 @@ class EpgApiController extends Controller
      * @param  \Carbon\Carbon  $endDate  End date for the programme schedule
      * @param  int  $duration  Duration in minutes for the dummy programme
      * @param  array|null  $patternInfo  Optional pattern information for title and timing
-     * @return array  Array of programme information arrays
+     * @return array Array of programme information arrays
      */
     private function generateDummyProgrammesForChannel(array $channelInfo, Carbon $startDate, Carbon $endDate, int $length, ?array $patternInfo = null): array
     {
