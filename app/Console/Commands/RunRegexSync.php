@@ -29,20 +29,20 @@ class RunRegexSync extends Command
      */
     public function handle(GeneralSettings $settings, EpgCacheService $cache): void
     {
-        if (empty($settings->regex_sync_schedule)) {
-            return;
-        }
-
-        $isDue = (new CronExpression($settings->regex_sync_schedule))->isDue();
-        if (! $isDue) {
-            return;
-        }
-
         $this->info('Running regex sync for playlists with regex channel management');
 
         /** @var \Illuminate\Support\Collection|CustomPlaylist[] $playlists */
         $playlists = CustomPlaylist::where('use_regex_channel_management', true)->get();
         foreach ($playlists as $playlist) {
+            $cron = $playlist->regex_sync_schedule;
+            if (empty($cron) || ! CronExpression::isValidExpression($cron)) {
+                continue;
+            }
+
+            if (! (new CronExpression($cron))->isDue()) {
+                continue;
+            }
+
             foreach ($playlist->channels as $channel) {
                 $playlist->applyEventPattern($channel);
             }

@@ -184,3 +184,33 @@ it('does not crash when a playlist has a tag without an english name', function 
         'use_regex_channel_management' => true,
     ])->assertHasNoFormErrors();
 });
+
+it('allows setting a regex sync schedule on the playlist form', function () {
+    // need a source playlist and group for the dropdown
+    $source = \App\Models\Playlist::factory()->for($this->user)->create();
+    $group = \App\Models\Group::create([
+        'name' => 'TheGroup',
+        'playlist_id' => $source->id,
+        'user_id' => $this->user->id,
+        'type' => 'live',
+    ]);
+
+    $channel = Channel::factory()->for($this->user)->for($source)->create();
+    $this->customPlaylist->channels()->attach($channel->id);
+
+    $page = Livewire::test(\App\Filament\Resources\CustomPlaylists\Pages\EditCustomPlaylist::class, [
+        'record' => $this->customPlaylist->id,
+    ]);
+
+    $page->fillForm([
+        'use_regex_channel_management' => true,
+        'regex_sync_schedule' => '0 * * * *',
+        'user_agent' => 'm3u-sync-test',
+        'event_patterns' => [
+            ['group' => 'TheGroup', 'pattern' => 'dummy'],
+        ],
+    ])->call('save')->assertHasNoFormErrors();
+
+    $this->customPlaylist->refresh();
+    expect($this->customPlaylist->regex_sync_schedule)->toBe('0 * * * *');
+});

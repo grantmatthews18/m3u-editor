@@ -5,7 +5,6 @@ namespace App\Filament\Pages;
 use App\Filament\Resources\Assets\AssetResource;
 use App\Jobs\RestartQueue;
 use App\Models\StreamProfile;
-use App\Rules\Cron;
 use App\Services\M3uProxyService;
 use App\Services\PlaylistService;
 use App\Settings\GeneralSettings;
@@ -844,19 +843,10 @@ class Preferences extends SettingsPage
                                                 TextInput::make('auto_backup_database_schedule')
                                                     ->label('Backup schedule (cron)')
                                                     ->hintIcon('heroicon-m-question-mark-circle')
-                                                    ->helperText(fn ($get) => CronExpression::isValidExpression($get('auto_backup_database_schedule'))
+                                                    ->helperText(fn ($get) => is_string($get('auto_backup_database_schedule')) && CronExpression::isValidExpression($get('auto_backup_database_schedule'))
                                                         ? 'Next scheduled backup: '.(new CronExpression($get('auto_backup_database_schedule')))->getNextRunDate()->format('Y-m-d H:i:s')
                                                         : '')
                                                     ->placeholder('0 3 * * *')
-                                                    ->rules(['nullable', 'string', 'cron']),
-
-                                                TextInput::make('regex_sync_schedule')
-                                                    ->label('Regex sync schedule (cron)')
-                                                    ->hintIcon('heroicon-m-question-mark-circle')
-                                                    ->helperText(fn ($get) => CronExpression::isValidExpression($get('regex_sync_schedule'))
-                                                        ? 'Next regex sync: '.(new CronExpression($get('regex_sync_schedule')))->getNextRunDate()->format('Y-m-d H:i:s')
-                                                        : '')
-                                                    ->placeholder('0 * * * *')
                                                     ->rules(['nullable', 'string', 'cron']),
                                             ])->hidden(fn ($get) => ! $get('auto_backup_database')),
                                     ]),

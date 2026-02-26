@@ -6,7 +6,6 @@ use App\Console\Commands\RunRegexSync;
 use App\Models\Channel;
 use App\Models\CustomPlaylist;
 use App\Models\Group;
-use App\Settings\GeneralSettings;
 use App\Services\EpgCacheService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Artisan;
@@ -16,12 +15,9 @@ class RegexSyncCommandTest extends TestCase
 {
     use RefreshDatabase;
 
-    protected GeneralSettings $settings;
-
     protected function setUp(): void
     {
         parent::setUp();
-        $this->settings = app(GeneralSettings::class);
 
         // avoid dispatching jobs to Redis during tests
         \Illuminate\Support\Facades\Queue::fake();
@@ -29,13 +25,12 @@ class RegexSyncCommandTest extends TestCase
 
     public function test_command_does_nothing_when_schedule_not_due()
     {
-        $this->settings->regex_sync_schedule = '0 0 1 1 *'; // unlikely to be due
-
         $custom = CustomPlaylist::factory()->create([
             'use_regex_channel_management' => true,
             'event_patterns' => [
                 ['group' => 'A', 'pattern' => '/foo/', 'disable_if_empty' => true],
             ],
+            'regex_sync_schedule' => '0 0 1 1 *', // not due
         ]);
 
         $group = Group::factory()->create(['name' => 'A', 'user_id' => $custom->user_id]);
@@ -61,13 +56,12 @@ class RegexSyncCommandTest extends TestCase
 
     public function test_command_recalculates_and_clears_cache_when_due()
     {
-        $this->settings->regex_sync_schedule = '* * * * *';
-
         $custom = CustomPlaylist::factory()->create([
             'use_regex_channel_management' => true,
             'event_patterns' => [
                 ['group' => 'A', 'pattern' => '/foo/', 'disable_if_empty' => true],
             ],
+            'regex_sync_schedule' => '* * * * *',
         ]);
 
         $group = Group::factory()->create(['name' => 'A', 'user_id' => $custom->user_id]);

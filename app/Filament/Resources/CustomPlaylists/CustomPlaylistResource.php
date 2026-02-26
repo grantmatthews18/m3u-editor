@@ -18,6 +18,7 @@ use App\Models\StreamProfile;
 use App\Services\EpgCacheService;
 use App\Services\M3uProxyService;
 use App\Traits\HasUserFiltering;
+use Cron\CronExpression;
 use Filament\Actions\Action;
 use Filament\Actions\ActionGroup;
 use Filament\Actions\BulkActionGroup;
@@ -339,6 +340,13 @@ class CustomPlaylistResource extends Resource
                 ->columnSpanFull()
                 ->visible(fn (Get $get): bool => $get('use_regex_channel_management'))
                 ->schema([
+                    TextInput::make('regex_sync_schedule')
+                        ->label('Sync schedule (cron)')
+                        ->helperText(fn ($get) => is_string($get('regex_sync_schedule')) && CronExpression::isValidExpression($get('regex_sync_schedule'))
+                            ? 'Next run: '.(new CronExpression($get('regex_sync_schedule')))->getNextRunDate()->format('Y-m-d H:i:s')
+                            : '')
+                        ->placeholder('0 * * * *')
+                        ->rules(['nullable', 'string']),
                     \Filament\Forms\Components\Repeater::make('event_patterns')
                         ->label('Patterns by Group')
                         ->columns(1)
@@ -406,6 +414,15 @@ class CustomPlaylistResource extends Resource
                             Toggle::make('disable_if_empty')
                                 ->label('Disable when no match')
                                 ->inline(false),
+                            TextInput::make('cron_schedule')
+                                ->label('Cron Schedule')
+                                ->placeholder('e.g. * * * * *')
+                                ->helperText('Cron schedule for recurring events. Leave empty for none.')
+                                ->rules(['nullable', 'string', 'max:255'])
+                                ->hintIcon(
+                                    'heroicon-m-exclamation-triangle',
+                                    tooltip: 'Specify a cron schedule to automatically enable/disable this pattern based on the server time. Be careful with this feature, as incorrect settings can lead to unexpected behavior.'
+                                ),
                         ])
                         ->createItemButtonLabel('Add pattern')
                         ->default([]),

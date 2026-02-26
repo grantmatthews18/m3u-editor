@@ -42,6 +42,11 @@ class EpgApiControllerTest extends TestCase
                     $table->json('event_patterns')->nullable()->default(json_encode([]))->after('dummy_epg_category');
                 });
             }
+            if (! \Illuminate\Support\Facades\Schema::hasColumn($tableName, 'regex_sync_schedule')) {
+                \Illuminate\Support\Facades\Schema::table($tableName, function (\Illuminate\Database\Schema\Blueprint $table) {
+                    $table->string('regex_sync_schedule')->nullable();
+                });
+            }
         }
 
         // ensure the application has an encryption key for Filament
