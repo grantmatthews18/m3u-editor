@@ -414,15 +414,6 @@ class CustomPlaylistResource extends Resource
                             Toggle::make('disable_if_empty')
                                 ->label('Disable when no match')
                                 ->inline(false),
-                            TextInput::make('cron_schedule')
-                                ->label('Cron Schedule')
-                                ->placeholder('e.g. * * * * *')
-                                ->helperText('Cron schedule for recurring events. Leave empty for none.')
-                                ->rules(['nullable', 'string', 'max:255'])
-                                ->hintIcon(
-                                    'heroicon-m-exclamation-triangle',
-                                    tooltip: 'Specify a cron schedule to automatically enable/disable this pattern based on the server time. Be careful with this feature, as incorrect settings can lead to unexpected behavior.'
-                                ),
                         ])
                         ->createItemButtonLabel('Add pattern')
                         ->default([]),
