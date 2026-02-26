@@ -303,15 +303,9 @@ class CustomPlaylist extends Model
             return null;
         }
 
-        $config = null;
-        $matches = [];
-
-        // we'll keep track of the first regex that actually matched at all in
-        // case none of the matching rules produce any named captures; that way a
-        // plain "/match/" rule still works when there isn't a more specific
-        // extractor further down the list.
-        $firstMatchConfig = null;
-        $firstMatchResults = [];
+        $bestConfig = null;
+        $bestMatches = [];
+        $bestScore = -1;
 
         $text = $channel->name_custom ?? $channel->name ?? $channel->title_custom ?? $channel->title ?? '';
 
@@ -326,37 +320,42 @@ class CustomPlaylist extends Model
                 continue;
             }
 
-            if (preg_match($regex, $text, $tempMatches)) {
-                if (is_null($firstMatchConfig)) {
-                    $firstMatchConfig = $entry;
-                    $firstMatchResults = $tempMatches;
-                }
+            $matches = [];
+            if (! preg_match($regex, $text, $matches)) {
+                continue;
+            }
 
-                // if this pattern gave us anything useful, pick it immediately
-                if (! empty($tempMatches['event']) || ! empty($tempMatches['start']) || ! empty($tempMatches['end'])) {
-                    $config = $entry;
-                    $matches = $tempMatches;
-                    break;
-                }
+            // score the result: prefer rules that supply a full start/stop
+            // pair, then a start, then an event.  this allows you to put a
+            // very broad capture ("match the word 'LIVE'" etc) anywhere in the
+            // list without preventing more specific rules from being used.
+            $score = 0;
+            if (! empty($matches['event'])) {
+                $score += 1;
+            }
+            if (! empty($matches['start'])) {
+                $score += 10;
+            }
+            if (! empty($matches['end'])) {
+                $score += 5; // end without start should not really happen,
+                              // but give it some weight just in case
+            }
+
+            if ($score > $bestScore) {
+                $bestScore = $score;
+                $bestConfig = $entry;
+                $bestMatches = $matches;
             }
         }
 
-        // if we didn't break out with a capturing rule, fall back to the first
-        // matching rule we saw (if any)
-        if (is_null($config) && $firstMatchConfig) {
-            $config = $firstMatchConfig;
-            $matches = $firstMatchResults;
-        }
-
-        if (is_null($config)) {
-            // nothing matched at all – apply disable_if_empty from any
-            // applicable entry and bail out.
+        if (is_null($bestConfig)) {
+            // no regex at all matched; if any of the applicable patterns asked
+            // for disable_if_empty, turn the channel off now.
             foreach ($patterns as $entry) {
                 $entryGroup = $entry['group'] ?? '';
                 if ($entryGroup !== $group && $entryGroup !== '' && $entryGroup !== '*') {
                     continue;
                 }
-
                 if (! empty($entry['disable_if_empty'])) {
                     $channel->update(['enabled' => false]);
                     break;
@@ -366,9 +365,11 @@ class CustomPlaylist extends Model
             return null;
         }
 
-        // at this point we have a configuration that matched the text (either
-        // capturing or not).  the old logic re‑enabled the channel if
-        // disable_if_empty was set on the chosen rule.
+        // we have a chosen configuration and the matches that drove it
+        $config = $bestConfig;
+        $matches = $bestMatches;
+
+        // re‑enable if requested
         if (! empty($config['disable_if_empty'])) {
             $channel->update(['enabled' => true]);
         }

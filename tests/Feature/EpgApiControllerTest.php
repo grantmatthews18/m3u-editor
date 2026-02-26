@@ -11,6 +11,7 @@ use App\Models\User;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
+use Mockery;
 
 class EpgApiControllerTest extends TestCase
 {
@@ -45,6 +46,22 @@ class EpgApiControllerTest extends TestCase
             if (! \Illuminate\Support\Facades\Schema::hasColumn($tableName, 'regex_sync_schedule')) {
                 \Illuminate\Support\Facades\Schema::table($tableName, function (\Illuminate\Database\Schema\Blueprint $table) {
                     $table->string('regex_sync_schedule')->nullable();
+                });
+            }
+            // ensure the necessary columns exist on the relations used by new tests
+            if (! \Illuminate\Support\Facades\Schema::hasColumn('channels', 'epg_id')) {
+                \Illuminate\Support\Facades\Schema::table('channels', function (\Illuminate\Database\Schema\Blueprint $table) {
+                    $table->integer('epg_id')->nullable();
+                });
+            }
+            if (! \Illuminate\Support\Facades\Schema::hasColumn('channels', 'epg_channel_key')) {
+                \Illuminate\Support\Facades\Schema::table('channels', function (\Illuminate\Database\Schema\Blueprint $table) {
+                    $table->string('epg_channel_key')->nullable();
+                });
+            }
+            if (! \Illuminate\Support\Facades\Schema::hasColumn('epg_channels', 'epg_channel_key')) {
+                \Illuminate\Support\Facades\Schema::table('epg_channels', function (\Illuminate\Database\Schema\Blueprint $table) {
+                    $table->string('epg_channel_key')->nullable();
                 });
             }
         }
@@ -769,5 +786,133 @@ class EpgApiControllerTest extends TestCase
         ]);
 
         $this->assertNull($custom->applyEventPattern($channel));
+    }
+
+    public function test_time_only_regex_without_named_groups_uses_default_length()
+    {
+        $custom = \App\Models\CustomPlaylist::factory()->for($this->user)->create([
+            'dummy_epg' => true,
+            'dummy_epg_length' => 180,
+            'dummy_epg_category' => true,
+        ]);
+
+        $group = Group::factory()->create([
+            'name' => 'Sports',
+            'user_id' => $this->user->id,
+        ]);
+
+        $channel = Channel::factory()->create([
+            'playlist_id' => $this->playlist->id,
+            'custom_playlist_id' => $custom->id,
+            'user_id' => $this->user->id,
+            'group_id' => $group->id,
+            'group' => $group->name,
+            'enabled' => true,
+            'is_vod' => false,
+            'name' => 'NHL Hockey 1 New York Rangers vs. N.Y. Islanders 10:00PM',
+        ]);
+        $custom->channels()->syncWithoutDetaching($channel->id);
+
+        $custom->update([
+            'use_regex_channel_management' => true,
+            'event_patterns' => [
+                [
+                    'group' => 'Sports',
+                    'pattern' => '/\b(?:\d{1,2}:\d{2}(?:AM|PM))\b/',
+                    'timezone' => 'UTC',
+                    'default_length' => 180,
+                    'disable_if_empty' => true,
+                ],
+            ],
+        ]);
+
+        // pattern itself returns nothing usable
+        $patternInfo = $custom->applyEventPattern($channel);
+        $this->assertNull($patternInfo['start'] ?? null);
+        $this->assertNull($patternInfo['stop'] ?? null);
+
+        // api should still return a dummy programme of 180 minutes
+        $response = $this->getJson("/api/epg/playlist/{$custom->uuid}/data");
+        $response->assertSuccessful();
+        $data = $response->json();
+
+        $this->assertCount(1, $data['programmes']);
+        $programme = array_values($data['programmes'])[0][0];
+        $start = Carbon::parse($programme['start']);
+        $stop = Carbon::parse($programme['stop']);
+        $this->assertEquals(180, $start->diffInMinutes($stop));
+    }
+
+    public function test_regex_overrides_cached_epg_for_mapped_channel()
+    {
+        // create an epg and mark it cached
+        $epg = \App\Models\Epg::factory()->create(['is_cached' => true]);
+
+        $custom = \App\Models\CustomPlaylist::factory()->for($this->user)->create([
+            'dummy_epg' => true,
+            'dummy_epg_length' => 120,
+            'dummy_epg_category' => true,
+        ]);
+
+        $group = Group::factory()->create([
+            'name' => 'Sports',
+            'user_id' => $this->user->id,
+        ]);
+
+        $channel = Channel::factory()->create([
+            'playlist_id' => $this->playlist->id,
+            'custom_playlist_id' => $custom->id,
+            'user_id' => $this->user->id,
+            'group_id' => $group->id,
+            'group' => $group->name,
+            'enabled' => true,
+            'is_vod' => false,
+            'epg_id' => $epg->id,
+            'epg_channel_key' => 'foo',
+        ]);
+        $custom->channels()->syncWithoutDetaching($channel->id);
+
+        // create a dummy epg channel record so the cache service will include it
+        \App\Models\EpgChannel::factory()->create([
+            'epg_id' => $epg->id,
+            'channel_id' => $channel->id,
+            'epg_channel_key' => 'foo',
+        ]);
+
+        // replace the cache service with a fake that returns a bogus programme
+        $fake = Mockery::mock(\App\Services\EpgCacheService::class);
+        $fake->shouldReceive('getCachedProgrammesRange')
+            ->andReturn([
+                'foo' => [[
+                    'start' => '2026-02-25T00:00:00+00:00',
+                    'stop'  => '2026-02-25T03:00:00+00:00',
+                    'title' => 'garbage',
+                ]],
+            ]);
+        $fake->shouldReceive('getCacheMetadata')
+            ->andReturn(['cache_created' => now()->toIso8601String(), 'total_programmes' => 1]);
+        $this->instance(\App\Services\EpgCacheService::class, $fake);
+
+        // apply a pattern that will match and provide its own start time
+        $custom->update([
+            'use_regex_channel_management' => true,
+            'event_patterns' => [
+                [
+                    'group' => 'Sports',
+                    'pattern' => '/\|\s*(?P<event>.*?)\s*\(2026-02-25 09:00:00\)\s*$/',
+                    'timezone' => 'UTC',
+                    'default_length' => 60,
+                    'disable_if_empty' => true,
+                ],
+            ],
+        ]);
+
+        $response = $this->getJson("/api/epg/playlist/{$custom->uuid}/data");
+        $response->assertSuccessful();
+        $data = $response->json();
+
+        $programmes = array_values($data['programmes'])[0];
+        $first = $programmes[0];
+        $this->assertEquals('2026-02-25T09:00:00+00:00', $first['start']);
     }
 }
