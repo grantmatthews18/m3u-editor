@@ -129,8 +129,15 @@ class PlaylistGenerateController extends Controller
                         $patternInfo = $playlist->applyEventPattern($channel);
                         if ($patternInfo) {
                             if (! empty($patternInfo['event'])) {
+                                // only override the display/title value, leave the
+                                // underlying channel name untouched so subsequent
+                                // regex runs continue to operate on the original
+                                // name field rather than a mutated title.
                                 $title = $patternInfo['event'];
-                                $name = $patternInfo['event'];
+                                // $name should remain the channel's configured name
+                                // so we don't accidentally change the playlist's
+                                // tvg-id or other identifiers.  The title is what
+                                // clients see as the channel name in the output.
                             }
                         }
 

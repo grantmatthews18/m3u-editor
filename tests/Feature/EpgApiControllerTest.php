@@ -443,6 +443,12 @@ class EpgApiControllerTest extends TestCase
         // event parsed from name should be everything between the pipe and the date
         $expectedEvent = 'Fairways of Life with Matt Adams';
         $this->assertEquals($expectedEvent, $channel->title_custom);
+        // the original channel name field must remain untouched
+        $this->assertEquals(
+            'US (ESPN+ 001) | Fairways of Life with Matt Adams Feb 25 9:00AM ET (2026-02-25 09:00:00)',
+            $channel->name,
+            'regex should run on the name column but not overwrite it'
+        );
 
         // instead of assuming key matches channel id, just pick the first programmes list
         $this->assertCount(1, $data['programmes']);
@@ -1064,6 +1070,7 @@ class EpgApiControllerTest extends TestCase
         $first = $custom->applyEventPattern($channel);
         $this->assertNotNull($first);
         $this->assertEquals('6PM News', $channel->title_custom);
+        $this->assertEquals('Local 6PM News 2026-05-01', $channel->name, 'name should not be modified by pattern');
 
         // mutate title_custom manually to simulate a second run operating on
         // changed data
@@ -1072,5 +1079,6 @@ class EpgApiControllerTest extends TestCase
         $second = $custom->applyEventPattern($channel);
         $this->assertNotNull($second, 'pattern should still match even after the model was mutated');
         $this->assertEquals('6PM News', $second['event']);
+        $this->assertEquals('Local 6PM News 2026-05-01', $channel->name, 'name must still be untouched');
     }
 }

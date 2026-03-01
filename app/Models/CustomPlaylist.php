@@ -306,7 +306,9 @@ class CustomPlaylist extends Model
         // Instead we always evaluate the pattern on the channel's *name*
         // column (the original name supplied when the channel was created).
         // the regex is still allowed to update the title or custom name, but
-        // those mutated values are never used as the source text.
+        // those mutated values are never used as the source text.  **we do not
+        // touch the `name` property itself** so that the underlying name remains
+        // stable between runs.
         $orig = $channel->getOriginal();
         $text = $orig['name'] ?? '';
 
