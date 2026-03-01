@@ -117,12 +117,19 @@ class EpgGenerateController extends Controller
                 $channelNo = ++$channelNumber;
             }
 
+            // determine the display title and name now that we know the channel
+            $title = $channel->title_custom ?? $channel->title;
+            $name = $channel->name_custom ?? $channel->name;
+
             // Apply event pattern if configured (can rename or disable channels)
+            $patternInfo = null;
             if ($playlist instanceof \App\Models\CustomPlaylist && $playlist->usesRegexManagement()) {
                 $patternInfo = $playlist->applyEventPattern($channel);
                 if ($patternInfo && ! empty($patternInfo['event'])) {
                     // make sure tvg/other ids use renamed title if relevant
                     $channel->title_custom = $patternInfo['event'];
+                    // also update local title so the channel tag below reflects it
+                    $title = $patternInfo['event'];
                 }
 
                 // skip output if the channel was disabled by the pattern
@@ -159,7 +166,6 @@ class EpgGenerateController extends Controller
             $tvgId = preg_replace(config('dev.tvgid.regex'), '', $tvgId);
 
             // Output the <channel> tag
-            $title = $channel->title_custom ?? $channel->title;
             $title = htmlspecialchars($title);
 
             // Get the EPG channel data
@@ -193,15 +199,15 @@ class EpgGenerateController extends Controller
 
                 // Output the <channel> tag
                 echo '  <channel id="'.$tvgId.'">'.PHP_EOL;
-                echo '    <display-name lang="'.$epgData->lang.'">'.$title.'</display-name>';
+                echo '    <display-name>'.$title.'</display-name>';
                 if ($channelNo !== null) {
-                    echo '    <display-name>'.$channelNo.'</display-name>';
+                    echo PHP_EOL.'    <display-name>'.$channelNo.'</display-name>';
                 }
                 if ($icon) {
-                    echo PHP_EOL.'    <icon src="'.htmlspecialchars($icon).'"/>';
+                    echo PHP_EOL.'    <icon src="'.$icon.'"/>';
                 }
                 echo PHP_EOL.'  </channel>'.PHP_EOL;
-            } elseif ($dummyEpgEnabled) {
+            } elseif ($dummyEpgEnabled || (! empty($patternInfo) && ! empty($patternInfo['start']))) {
                 // Get the icon
                 $icon = $channel->logo ?? $channel->logo_internal ?? '';
                 if (empty($icon)) {
@@ -212,7 +218,7 @@ class EpgGenerateController extends Controller
                     $icon = LogoProxyController::generateProxyUrl($icon);
                 }
 
-                // Build base data for this dummy channel
+                // Build base data for this dummy or pattern channel
                 $entry = [
                     'tvg_id' => $tvgId,
                     'channel_id' => $channel->id,
@@ -234,7 +240,7 @@ class EpgGenerateController extends Controller
                 }
 
                 // Keep track of which channels need a dummy EPG program
-                // Need this to output the <programme> tags later
+                // This also captures pattern channels when dummy epg is disabled
                 $dummyEpgChannels[] = $entry;
 
                 // Output the <channel> tag
@@ -412,36 +418,52 @@ class EpgGenerateController extends Controller
                 $group = $dummyEpgChannel['group'];
                 $includeCategory = $dummyEpgChannel['include_category'];
 
-                // If this channel has explicit start/stop times provided by a pattern,
-                // just output a single programme entry and skip the precomputed slots.
-                if (isset($dummyEpgChannel['start']) && isset($dummyEpgChannel['stop'])) {
-                    echo '  <programme channel="'.$tvgId.'" start="'.$dummyEpgChannel['start'].'" stop="'.$dummyEpgChannel['stop'].'">'.PHP_EOL;
-                    echo '    <title>'.$title.'</title>'.PHP_EOL;
-                    if ($icon) {
-                        echo '    <icon src="'.$icon.'"/>'.PHP_EOL;
+                // If this channel has explicit start time provided by a pattern,
+                // output a single programme slot.  If an explicit stop time was
+                // also supplied, use it; otherwise fall back to the configured
+                // dummy length.  This mirrors the behaviour of the API helper.
+                if (isset($dummyEpgChannel['start'])) {
+                    $startStr = $dummyEpgChannel['start'];
+                    if (isset($dummyEpgChannel['stop'])) {
+                        $stopStr = $dummyEpgChannel['stop'];
+                    } else {
+                        // compute stop using Carbon so the offset is preserved
+                        try {
+                            $startDt = Carbon::createFromFormat('YmdHis O', $startStr);
+                            $stopStr = str_replace(':', '', $startDt->copy()->addMinutes($dummyEpgLength)->format('YmdHis P'));
+                        } catch (\Exception $e) {
+                            // fallback: just add length without offset
+                            $stopStr = $startStr;
+                        }
                     }
-                    echo '    <desc>'.$title.'</desc>'.PHP_EOL;
-                    if ($includeCategory) {
-                        echo '    <category lang="en">'.$group.'</category>'.PHP_EOL;
-                    }
-                    echo '  </programme>'.PHP_EOL;
 
-                    continue;
+                    echo "  <programme channel=\"{$tvgId}\" start=\"{$startStr}\" stop=\"{$stopStr}\">".PHP_EOL;
+                    echo "    <title>{$title}</title>".PHP_EOL;
+                    if ($icon) {
+                        echo "    <icon src=\"{$icon}\"/>".PHP_EOL;
+                    }
+                    echo "    <desc>{$title}</desc>".PHP_EOL;
+                    if ($includeCategory) {
+                        echo "    <category lang=\"en\">{$group}</category>".PHP_EOL;
+                    }
+                    echo "  </programme>".PHP_EOL;
+
+                continue;
                 }
 
                 // Build all programmes for this channel in one string buffer
                 $buffer = '';
                 foreach ($timeSlots as $slot) {
-                    $buffer .= '  <programme channel="'.$tvgId.'" start="'.$slot['start'].'" stop="'.$slot['end'].'">'.PHP_EOL;
-                    $buffer .= '    <title>'.$title.'</title>'.PHP_EOL;
+                    $buffer .= "  <programme channel=\"{$tvgId}\" start=\"{$slot['start']}\" stop=\"{$slot['end']}\">".PHP_EOL;
+                    $buffer .= "    <title>{$title}</title>".PHP_EOL;
                     if ($icon) {
-                        $buffer .= '    <icon src="'.$icon.'"/>'.PHP_EOL;
+                        $buffer .= "    <icon src=\"{$icon}\"/>".PHP_EOL;
                     }
-                    $buffer .= '    <desc>'.$title.'</desc>'.PHP_EOL;
+                    $buffer .= "    <desc>{$title}</desc>".PHP_EOL;
                     if ($includeCategory) {
-                        $buffer .= '    <category lang="en">'.$group.'</category>'.PHP_EOL;
+                        $buffer .= "    <category lang=\"en\">{$group}</category>".PHP_EOL;
                     }
-                    $buffer .= '  </programme>'.PHP_EOL;
+                    $buffer .= "  </programme>".PHP_EOL;
                 }
                 // Single echo per channel instead of 600+ echoes
                 echo $buffer;

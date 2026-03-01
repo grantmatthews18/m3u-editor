@@ -1081,4 +1081,64 @@ class EpgApiControllerTest extends TestCase
         $this->assertEquals('6PM News', $second['event']);
         $this->assertEquals('Local 6PM News 2026-05-01', $channel->name, 'name must still be untouched');
     }
+
+    public function test_xml_epg_includes_pattern_slot_when_dummy_epg_disabled()
+    {
+        $custom = \App\Models\CustomPlaylist::factory()->for($this->user)->create([
+            'dummy_epg' => false,
+        ]);
+        $group = Group::factory()->create([
+            'name' => 'Sports',
+            'user_id' => $this->user->id,
+        ]);
+
+        $channel = Channel::factory()->create([
+            'playlist_id' => $this->playlist->id,
+            'custom_playlist_id' => $custom->id,
+            'user_id' => $this->user->id,
+            'group_id' => $group->id,
+            'group' => $group->name,
+            'enabled' => true,
+            'is_vod' => false,
+            'name' => 'US (ESPN+ 001) | Brisbane Roar FC vs. Perth Glory Feb 28 1:55AM ET (2026-02-28 01:55:09)',
+        ]);
+        $custom->channels()->syncWithoutDetaching($channel->id);
+
+        $custom->update([
+            'use_regex_channel_management' => true,
+            'event_patterns' => [
+                [
+                    'group' => 'Sports',
+                    'pattern' => '/\|\s*(?P<event>.+?)(?=\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b).*?\((?P<start>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\)\s*$/',
+                    'timezone' => 'UTC',
+                    'default_length' => 180,
+                    'disable_if_empty' => true,
+                ],
+            ],
+        ]);
+
+        // perform an HTTP request so that routing/middleware is executed, then
+        // capture the streamed body by manually sending the response content
+        config(['session.driver' => 'array']);
+        $response = $this->get("/{$custom->uuid}/epg.xml");
+        $response->assertSuccessful();
+
+        // capture the generated XML by invoking the private generator method
+        $controller = app(\App\Http\Controllers\EpgGenerateController::class);
+        $method = new \ReflectionMethod($controller, 'generate');
+        $method->setAccessible(true);
+
+        ob_start();
+        $method->invoke($controller, $custom);
+        $xml = ob_get_clean();
+
+        // should contain the parsed event title
+        $this->assertStringContainsString('Brisbane Roar FC vs. Perth Glory', $xml);
+
+        // the start timestamp (formatted YmdHis+offset) should be present
+        $this->assertStringContainsString('20260228015509', $xml);
+
+        // there should be exactly one programme slot
+        $this->assertEquals(1, substr_count($xml, '<programme'));
+    }
 }
