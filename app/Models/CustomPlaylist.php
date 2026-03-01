@@ -283,8 +283,11 @@ class CustomPlaylist extends Model
      * depending on the pattern configuration. Returns an array containing
      * parsed event data (event, start, stop) when a match is found, or null
      * otherwise.
+     *
+     * @param  bool  $persistChanges  When false, DB writes (title_custom, enabled) are skipped.
+     *                                Pass false during read-only operations such as EPG generation.
      */
-    public function applyEventPattern(Channel $channel): ?array
+    public function applyEventPattern(Channel $channel, bool $persistChanges = true): ?array
     {
         // determine the channel's group for the purposes of pattern matching.  we
         // mimic the logic used in PlaylistGenerateController so that the name the
@@ -298,19 +301,13 @@ class CustomPlaylist extends Model
             }
         }
 
-        // build the text to run the regex against.  previously we looked at
-        // custom/title fields as well, which meant that once a channel had
-        // already been "cleaned" the rule would no longer match.  this caused
-        // problems for playlists that were regenerated over multiple builds.
-        //
-        // Instead we always evaluate the pattern on the channel's *name*
-        // column (the original name supplied when the channel was created).
-        // the regex is still allowed to update the title or custom name, but
-        // those mutated values are never used as the source text.  **we do not
-        // touch the `name` property itself** so that the underlying name remains
-        // stable between runs.
-        $orig = $channel->getOriginal();
-        $text = $orig['name'] ?? '';
+        // Always evaluate the pattern on the channel's *name* column (the original
+        // name supplied when the channel was created).  We use the attribute directly
+        // rather than getOriginal() because getOriginal() is synced after every
+        // update() call, so it would return the already-mutated title_custom value
+        // on subsequent runs inside the same request.  The `name` column is never
+        // mutated by this method, so it is always safe to read directly.
+        $text = $channel->name ?? '';
 
         $patterns = $this->event_patterns ?? [];
         if (! is_array($patterns)) {
@@ -369,7 +366,11 @@ class CustomPlaylist extends Model
                     continue;
                 }
                 if (! empty($entry['disable_if_empty'])) {
-                    $channel->update(['enabled' => false]);
+                    if ($persistChanges) {
+                        $channel->update(['enabled' => false]);
+                    } else {
+                        $channel->enabled = false;
+                    }
                     break;
                 }
             }
@@ -383,7 +384,11 @@ class CustomPlaylist extends Model
 
         // re‑enable if requested
         if (! empty($config['disable_if_empty'])) {
-            $channel->update(['enabled' => true]);
+            if ($persistChanges) {
+                $channel->update(['enabled' => true]);
+            } else {
+                $channel->enabled = true;
+            }
         }
 
         $event = $matches['event'] ?? null;
@@ -454,7 +459,11 @@ class CustomPlaylist extends Model
         }
 
         if ($event) {
-            $channel->update(['title_custom' => $event]);
+            if ($persistChanges) {
+                $channel->update(['title_custom' => $event]);
+            } else {
+                $channel->title_custom = $event;
+            }
         }
 
         return [
@@ -498,6 +507,10 @@ class CustomPlaylist extends Model
             $playlist->channels()->get()->each(function (Channel $channel) use ($playlist) {
                 $playlist->applyEventPattern($channel);
             });
+
+            // Clear the cached EPG file so the next request regenerates it with
+            // the freshly-applied pattern data instead of serving stale content.
+            \App\Services\EpgCacheService::clearPlaylistEpgCacheFile($playlist);
         });
     }
 }

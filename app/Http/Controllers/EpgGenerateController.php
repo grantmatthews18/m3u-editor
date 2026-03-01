@@ -124,7 +124,7 @@ class EpgGenerateController extends Controller
             // Apply event pattern if configured (can rename or disable channels)
             $patternInfo = null;
             if ($playlist instanceof \App\Models\CustomPlaylist && $playlist->usesRegexManagement()) {
-                $patternInfo = $playlist->applyEventPattern($channel);
+                $patternInfo = $playlist->applyEventPattern($channel, persistChanges: false);
                 if ($patternInfo && ! empty($patternInfo['event'])) {
                     // make sure tvg/other ids use renamed title if relevant
                     $channel->title_custom = $patternInfo['event'];
@@ -207,7 +207,7 @@ class EpgGenerateController extends Controller
                     echo PHP_EOL.'    <icon src="'.$icon.'"/>';
                 }
                 echo PHP_EOL.'  </channel>'.PHP_EOL;
-            } elseif ($dummyEpgEnabled || (! empty($patternInfo) && ! empty($patternInfo['start']))) {
+            } elseif ($dummyEpgEnabled || ! empty($patternInfo)) {
                 // Get the icon
                 $icon = $channel->logo ?? $channel->logo_internal ?? '';
                 if (empty($icon)) {
@@ -446,9 +446,9 @@ class EpgGenerateController extends Controller
                     if ($includeCategory) {
                         echo "    <category lang=\"en\">{$group}</category>".PHP_EOL;
                     }
-                    echo "  </programme>".PHP_EOL;
+                    echo '  </programme>'.PHP_EOL;
 
-                continue;
+                    continue;
                 }
 
                 // Build all programmes for this channel in one string buffer
@@ -463,7 +463,7 @@ class EpgGenerateController extends Controller
                     if ($includeCategory) {
                         $buffer .= "    <category lang=\"en\">{$group}</category>".PHP_EOL;
                     }
-                    $buffer .= "  </programme>".PHP_EOL;
+                    $buffer .= '  </programme>'.PHP_EOL;
                 }
                 // Single echo per channel instead of 600+ echoes
                 echo $buffer;

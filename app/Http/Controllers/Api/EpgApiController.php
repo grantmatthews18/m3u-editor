@@ -347,8 +347,11 @@ class EpgApiController extends Controller
                     'playlist_channel_id' => $channelKey,
                 ];
 
-                // track channels that might require dummy programmes
-                if (is_null($epgId) && $dummyEpgEnabled) {
+                // track channels that might require dummy programmes.
+                // include all regex-pattern-matched channels (not just when dummy
+                // EPG is globally enabled) so that event-only patterns (with no
+                // captured start time) still produce at least a programme slot.
+                if (is_null($epgId) && ($dummyEpgEnabled || ! empty($patternInfo))) {
                     $dummyEpgChannels[$channelKey] = [
                         'title' => $channels[$channelKey]['display_name'],
                         'icon' => $logo,
@@ -491,23 +494,44 @@ class EpgApiController extends Controller
             // disabled; without this, the API would return an empty list and the
             // frontend would fall back to displaying its own dummy epg.
             foreach ($channels as $chKey => $info) {
-                if (empty($programmes[$chKey]) && ! empty($patternInfoMap[$chKey]['start'])) {
-                    $start = $patternInfoMap[$chKey]['start']->toIso8601String();
-                    $stop = isset($patternInfoMap[$chKey]['stop'])
-                        ? $patternInfoMap[$chKey]['stop']->toIso8601String()
-                        : Carbon::parse($start)->addMinutes($dummyEpgLength)->toIso8601String();
-
-                    $programmes[$chKey] = [
-                        [
-                            'start' => $start,
-                            'stop' => $stop,
-                            'title' => $patternInfoMap[$chKey]['event'] ?? '',
-                            'desc' => $patternInfoMap[$chKey]['event'] ?? '',
-                            'icon' => $channels[$chKey]['icon'] ?? '',
-                            'category' => $channels[$chKey]['include_category'] ? $channels[$chKey]['group'] : null,
-                        ],
-                    ];
+                if (! empty($programmes[$chKey])) {
+                    continue;
                 }
+                $pi = $patternInfoMap[$chKey] ?? null;
+                if (empty($pi)) {
+                    continue;
+                }
+
+                if (! empty($pi['start'])) {
+                    // Pattern provided an explicit start time — use it directly.
+                    $start = $pi['start']->toIso8601String();
+                    $stop = isset($pi['stop'])
+                        ? $pi['stop']->toIso8601String()
+                        : Carbon::parse($start)->addMinutes($dummyEpgLength)->toIso8601String();
+                } else {
+                    // Pattern matched (event-only, no time captured) — fall back to
+                    // a dummy time-slot so the channel still appears in the guide.
+                    $programmes[$chKey] = $this->generateDummyProgrammesForChannel(
+                        $info,
+                        $startDate,
+                        $endDate,
+                        $dummyEpgLength,
+                        $pi
+                    );
+
+                    continue;
+                }
+
+                $programmes[$chKey] = [
+                    [
+                        'start' => $start,
+                        'stop' => $stop,
+                        'title' => $pi['event'] ?? '',
+                        'desc' => $pi['event'] ?? '',
+                        'icon' => $channels[$chKey]['icon'] ?? '',
+                        'category' => $channels[$chKey]['include_category'] ? $channels[$chKey]['group'] : null,
+                    ],
+                ];
             }
 
             // determine total channel count for pagination (ignoring per-page filter)
